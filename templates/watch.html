@@ -100,6 +100,17 @@
             width: 100%; aspect-ratio: 16/9; background: #000;
             border-radius: 20px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.15);
         }
+        /* 動画再生用のオーバーレイ */
+        #play-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6); display: flex; flex-direction: column; align-items: center; justify-content: center;
+            z-index: 10; cursor: pointer; color: #fff;
+        }
+        #play-overlay i {
+            font-size: 5rem; margin-bottom: 15px; color: var(--primary-color);
+            transition: transform 0.2s;
+        }
+        #play-overlay:hover i { transform: scale(1.1); color: #fff; }
         video { width: 100%; height: 100%; outline: none; }
         iframe { width: 100%; height: 100%; border: none; }
         .loader-overlay {
@@ -279,6 +290,7 @@
                         <strong>{{ stream.resolution }}</strong> 
                         <span style="color:#888; font-size:0.8rem; margin-left:5px;">({{ stream.format }})</span>
                     </div>
+                    <!-- DLリンクは全て生URLを出力 -->
                     <a href="{{ stream.rawVideoUrl or stream.url }}" download class="quality-btn" style="text-decoration:none;">保存</a>
                 </div>
                 {% endfor %}
@@ -315,9 +327,16 @@
         <div class="video-section">
             <div id="player-wrapper">
                 <div id="loader" class="loader-overlay"><div class="custom-loader"></div></div>
-                <video id="video-player" controls autoplay playsinline poster="/thumbnail?v={{ videoid }}">
+                <div id="play-overlay">
+                    <i class="fas fa-play-circle"></i>
+                    <span style="font-size:1.2rem; font-weight:bold;">タップして再生</span>
+                </div>
+                
+                <video id="video-player" playsinline poster="/thumbnail?v={{ videoid }}">
                     ブラウザが動画再生に対応していません。
                 </video>
+                <audio id="audio-sync" style="display:none;" playsinline></audio>
+                
                 <div id="iframe-container" style="display:none; width:100%; height:100%;"></div>
             </div>
 
@@ -338,7 +357,8 @@
                         <div class="custom-options">
                             <div class="custom-option selected" data-type="m3u8" data-value="{{ hls_url | safe }}">自動 (デフォルト/HLS)</div>
                             {% for stream in streamUrls %}
-                            <div class="custom-option" data-type="mp4" data-value="{{ stream.url }}">
+                            <!-- safeフィルタにより&amp;文字化けを防止 -->
+                            <div class="custom-option" data-type="mp4" data-value="{{ stream.url | safe }}" data-audio="{{ stream.audioUrl | safe }}">
                                 {{ stream.resolution }} ({{ stream.format }})
                             </div>
                             {% endfor %}
@@ -402,6 +422,8 @@
 
     <script>
         const video = document.getElementById('video-player');
+        const audio = document.getElementById('audio-sync');
+        const playOverlay = document.getElementById('play-overlay');
         const loader = document.getElementById('loader');
         const selectWrapper = document.getElementById('qualitySelect');
         const selectTrigger = selectWrapper.querySelector('.custom-select-trigger');
@@ -409,49 +431,39 @@
         const iframeContainer = document.getElementById('iframe-container');
         
         let hls = null;
-        let isHlsFailed = false; 
+        let isHlsFailed = false;
+        let isFallbackActive = false;
         const hlsUrl = "{{ hls_url | safe }}";
 
-        // 初期化時にHLSを優先再生
+        // --- 起動時の初期化 (HLS優先) ---
         document.addEventListener('DOMContentLoaded', () => {
             if (hlsUrl && hlsUrl !== "None") {
-                playM3U8(hlsUrl);
+                setupM3U8(hlsUrl);
             } else {
                 fallbackToMp4();
             }
         });
 
-        function playM3U8(m3u8Url) {
-            if (hls) {
-                hls.destroy();
-                hls = null;
-            }
+        function setupM3U8(m3u8Url) {
+            if (hls) { hls.destroy(); hls = null; }
             video.removeAttribute('src');
+            audio.src = ""; // HLSでは音声不要
 
             if (Hls.isSupported()) {
-                // PC / Android向け (hls.js)
                 hls = new Hls();
                 hls.loadSource(m3u8Url);
                 hls.attachMedia(video);
-                hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                    video.play().catch(() => {});
-                });
                 hls.on(Hls.Events.ERROR, function(event, data) {
-                    if (data.fatal) {
+                    if (data.fatal && !isFallbackActive) {
                         console.warn("HLS Error:", data);
                         hls.destroy();
                         fallbackToMp4();
                     }
                 });
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                // iPad / iOS向け (SafariネイティブHLS再生)
                 video.src = m3u8Url;
-                video.addEventListener('loadedmetadata', function() {
-                    video.play().catch(() => {});
-                });
-                // ネイティブ再生失敗時のフォールバック処理
                 video.addEventListener('error', function hlsErrorFallback() {
-                    if (!isHlsFailed) {
+                    if (!isFallbackActive && video.src && video.src.includes('.m3u8')) {
                         video.removeEventListener('error', hlsErrorFallback);
                         fallbackToMp4();
                     }
@@ -461,49 +473,125 @@
             }
         }
 
+        // --- フォールバック処理 (待機時間ゼロのフロントエンド分離再生) ---
         function fallbackToMp4() {
-            if (isHlsFailed) return;
-            isHlsFailed = true; // 重複実行を防止
-            
-            // HTML属性(DOM)からURLを取得し、&amp; エスケープのバグを完全に回避する
+            if (isFallbackActive) return;
+            isFallbackActive = true;
+            isHlsFailed = true;
+
             const fallbackOpt = document.querySelector('.custom-option[data-type="mp4"]');
             if (!fallbackOpt) return;
             
             const fallbackUrl = fallbackOpt.getAttribute('data-value');
+            const fallbackAudio = fallbackOpt.getAttribute('data-audio');
             if (!fallbackUrl) return;
 
-            showNotify("HLS通信に失敗しました。バックエンド結合に切り替えます。", true);
-            changeQualityLogic(fallbackUrl);
-
-            // 画質メニューの見た目を選択状態に更新
-            document.querySelectorAll('.custom-option').forEach(opt => opt.classList.remove('selected'));
+            showNotify("HLSの取得に失敗しました。分離再生に切り替えます。", true);
+            
+            // 画質メニューの見た目更新
+            options.forEach(opt => opt.classList.remove('selected'));
             fallbackOpt.classList.add('selected');
             selectTrigger.querySelector('span').innerText = fallbackOpt.innerText;
+
+            changeQualityLogic(fallbackUrl, fallbackAudio);
+            
+            // 自動再生が許可されていれば再開
+            if (video.hasAttribute('controls')) {
+                video.play().catch(()=>{});
+                if(audio.src) audio.play().catch(()=>{});
+            }
         }
 
+        function changeQualityLogic(url, audioUrl) {
+            if (hls) { hls.destroy(); hls = null; }
+            const currentTime = video.currentTime;
+            const isPaused = video.paused;
+            loader.style.display = 'flex';
+            
+            video.src = url;
+            if(audioUrl && audioUrl !== "None") {
+                audio.src = audioUrl;
+            } else {
+                audio.src = "";
+            }
+
+            video.onloadedmetadata = () => {
+                video.currentTime = currentTime;
+                if (!isPaused && video.hasAttribute('controls')) {
+                    video.play().catch(() => {});
+                    if(audio.src) audio.play().catch(() => {});
+                }
+                video.onloadedmetadata = null;
+                loader.style.display = 'none';
+            };
+            showNotify("画質を切り替えました");
+        }
+
+        // --- ユーザー操作による再生開始 ---
+        playOverlay.addEventListener('click', () => {
+            playOverlay.style.display = 'none';
+            video.setAttribute('controls', 'controls');
+            
+            video.play().catch(e => console.log(e));
+            if (audio.src) {
+                audio.play().catch(e => console.log(e));
+            }
+        });
+
+        // --- 分離再生時の同期ロジック ---
+        video.addEventListener('play', () => {
+            if (audio.src && video.currentTime > 0) {
+                audio.play().catch(e => {
+                    console.log("Audio block detected.");
+                    playOverlay.style.display = 'flex';
+                    video.removeAttribute('controls');
+                    video.pause();
+                });
+            }
+        });
+        video.addEventListener('pause', () => { if (audio.src) audio.pause(); });
+        video.addEventListener('seeking', () => { if (audio.src) audio.pause(); });
+        video.addEventListener('seeked', () => {
+            if (audio.src) {
+                audio.currentTime = video.currentTime;
+                if (!video.paused) audio.play().catch(()=>{});
+            }
+        });
+        video.addEventListener('ratechange', () => { if (audio.src) audio.playbackRate = video.playbackRate; });
+        video.addEventListener('volumechange', () => {
+            if (audio.src) { audio.volume = video.volume; audio.muted = video.muted; }
+        });
+        video.addEventListener('waiting', () => { loader.style.display = 'flex'; });
+        video.addEventListener('playing', () => { loader.style.display = 'none'; });
+
+        video.addEventListener('error', () => {
+            if (isHlsFailed || isFallbackActive) {
+                loader.style.display = 'none';
+                showNotify("読み込みエラーが発生しました。", true);
+            }
+        });
+
+        // --- UI・メニューコントロール ---
         function toggleControlMenu() {
             const menu = document.getElementById('ctrlMenu');
             menu.style.display = (menu.style.display === 'flex') ? 'none' : 'flex';
         }
-
         function toggleLoop(el) {
             video.loop = !video.loop;
             el.classList.toggle('active');
             showNotify(video.loop ? "ループ再生を有効にしました" : "ループ再生を解除しました");
         }
-
         function toggleMute(el) {
             video.muted = !video.muted;
+            if(audio.src) audio.muted = video.muted;
             el.classList.toggle('active');
             showNotify(video.muted ? "音声をミュートしました" : "ミュートを解除しました");
         }
-
         function openQualityFromCtrl() {
             toggleControlMenu();
             selectWrapper.scrollIntoView({ behavior: 'smooth', block: 'center' });
             setTimeout(() => selectWrapper.classList.add('open'), 500);
         }
-
         function toggleSourceOptions() {
             document.getElementById('srcOpts').classList.toggle('show');
         }
@@ -511,18 +599,15 @@
         let currentSourceType = 'stream';
         function setExternalSource(type) {
             if (currentSourceType === type) return;
-            
             document.querySelectorAll('.sub-item').forEach(i => i.classList.remove('selected'));
             document.getElementById('src-' + type).classList.add('selected');
             document.getElementById('sourceToggle').classList.toggle('active', type !== 'stream');
-            
             currentSourceType = type;
             
             if (type === 'stream') {
                 iframeContainer.style.display = 'none';
                 iframeContainer.innerHTML = '';
                 video.style.display = 'block';
-                video.play().catch(() => {});
                 showNotify("Streamソースに戻しました");
             } else {
                 let domain = type === 'nocookie' ? 'www.youtube-nocookie.com' : 'www.youtube-education.com';
@@ -535,49 +620,7 @@
             }
         }
 
-        selectTrigger.addEventListener('click', () => {
-            selectWrapper.classList.toggle('open');
-        });
-
-        options.forEach(option => {
-            option.addEventListener('click', function() {
-                const type = this.getAttribute('data-type');
-                const url = this.getAttribute('data-value');
-
-                options.forEach(opt => opt.classList.remove('selected'));
-                this.classList.add('selected');
-                selectTrigger.querySelector('span').innerText = this.innerText;
-                selectWrapper.classList.remove('open');
-
-                if (type === 'm3u8') {
-                    if (hlsUrl && hlsUrl !== "None") {
-                        isHlsFailed = false; // フラグリセット
-                        playM3U8(hlsUrl);
-                        showNotify("HLS再生に切り替えました");
-                    } else {
-                        showNotify("この動画はHLSに対応していません", true);
-                    }
-                    return;
-                }
-
-                changeQualityLogic(url);
-            });
-        });
-
-        function changeQualityLogic(url) {
-            if (hls) { hls.destroy(); hls = null; }
-            const currentTime = video.currentTime;
-            const isPaused = video.paused;
-            loader.style.display = 'flex';
-            video.src = url;
-            video.onloadedmetadata = () => {
-                video.currentTime = currentTime;
-                if (!isPaused) video.play().catch(() => {});
-                video.onloadedmetadata = null;
-            };
-            showNotify("画質を切り替えました");
-        }
-
+        selectTrigger.addEventListener('click', () => { selectWrapper.classList.toggle('open'); });
         window.addEventListener('click', (e) => {
             if (!selectWrapper.contains(e.target) && !document.getElementById('floating-control').contains(e.target)) {
                 selectWrapper.classList.remove('open');
@@ -586,21 +629,32 @@
             }
         });
 
-        video.addEventListener('waiting', () => {
-            loader.style.display = 'flex';
-        });
+        options.forEach(option => {
+            option.addEventListener('click', function() {
+                const type = this.getAttribute('data-type');
+                const url = this.getAttribute('data-value');
+                const audioUrl = this.getAttribute('data-audio');
 
-        video.addEventListener('playing', () => {
-            loader.style.display = 'none';
-        });
+                options.forEach(opt => opt.classList.remove('selected'));
+                this.classList.add('selected');
+                selectTrigger.querySelector('span').innerText = this.innerText;
+                selectWrapper.classList.remove('open');
 
-        video.addEventListener('error', () => {
-            // HLSネイティブエラーの場合はフォールバック側で処理されるため、ここでの通知を除外
-            if (!isHlsFailed && video.src && (video.src.includes('hls') || video.src.includes('manifest'))) return;
-            
-            if (currentSourceType !== 'stream') return;
-            loader.style.display = 'none';
-            showNotify("読み込みエラーが発生しました。", true);
+                if (type === 'm3u8') {
+                    if (hlsUrl && hlsUrl !== "None") {
+                        isFallbackActive = false;
+                        isHlsFailed = false;
+                        setupM3U8(hlsUrl);
+                        showNotify("HLS再生に切り替えました");
+                    } else {
+                        showNotify("この動画はHLSに対応していません", true);
+                    }
+                    return;
+                }
+
+                isFallbackActive = true;
+                changeQualityLogic(url, audioUrl);
+            });
         });
 
         function showNotify(msg, isError = false) {
@@ -628,14 +682,8 @@
         });
         function openModal() { document.getElementById('dl-modal').style.display = 'flex'; }
         function closeModal() { document.getElementById('dl-modal').style.display = 'none'; }
-        window.onclick = function(event) {
-            const modal = document.getElementById('dl-modal');
-            if (event.target == modal) closeModal();
-        }
-        function copyId() {
-            const id = "{{ videoid }}";
-            navigator.clipboard.writeText(id).then(() => { showNotify("動画IDをコピーしました"); });
-        }
+        window.onclick = function(event) { if (event.target == document.getElementById('dl-modal')) closeModal(); }
+        function copyId() { navigator.clipboard.writeText("{{ videoid }}").then(() => showNotify("動画IDをコピーしました")); }
     </script>
 </body>
 </html>
