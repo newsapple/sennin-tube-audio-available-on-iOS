@@ -196,26 +196,15 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
                 url_str = f.get("url", "").lower()
                 
                 track_score = 0
-                
-                if not audio_track:
-                    track_score = 1
-                
-                if is_default:
-                    track_score = 2
-                    
-                if "original" in track_name or "オリジナル" in track_name or "acont%3doriginal" in url_str:
-                    track_score = 3
-                
-                if (lang.startswith("ja") or lang.startswith("jp") or 
-                    "japanese" in track_name or "日本語" in track_name or 
-                    "lang%3dja" in url_str or "lang%3djp" in url_str or 
-                    "lang=ja" in url_str or "lang=jp" in url_str):
+                if not audio_track: track_score = 1
+                if is_default: track_score = 2
+                if "original" in track_name or "オリジナル" in track_name or "acont%3doriginal" in url_str: track_score = 3
+                if (lang.startswith("ja") or lang.startswith("jp") or "japanese" in track_name or "日本語" in track_name or "lang%3dja" in url_str or "lang%3djp" in url_str or "lang=ja" in url_str or "lang=jp" in url_str):
                     track_score = 100
                 
-                # iPadの <audio> タグで再生不可能なWebM(Opus)を回避するため、
-                # M4A(AAC) 形式に対してスコアを大幅に加算し、最優先で取得させる
+                # iPadの <audio> タグで確実に再生可能な MP4/M4A 形式に対してスコアを大幅に加算
                 if "mp4" in f.get("type", "") or "m4a" in f.get("container", ""):
-                    track_score += 50
+                    track_score += 1000
                 
                 if track_score > best_score:
                     best_score = track_score
@@ -233,13 +222,15 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
             "audioUrl": ""
         } for fmt in format_streams]
         
+        # 映像もWebMを排除し、MP4コンテナの映像トラックのみを抽出
         stream_urls.extend({
             "url": fmt.get("url"),
             "resolution": fmt.get("qualityLabel"),
-            "format": "webm/videoOnly",
+            "format": "mp4/videoOnly",
             "audioUrl": audio_url
-        } for fmt in adaptive if "video" in fmt.get("type", "") and "webm" in fmt.get("container", ""))
+        } for fmt in adaptive if "video" in fmt.get("type", "") and "mp4" in fmt.get("container", "mp4"))
 
+        # デフォルトURLを720p（MP4）に設定
         default_url = None
         for stream in stream_urls:
             if "720p" in str(stream.get("resolution", "")):
@@ -247,12 +238,9 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
                 break
         
         if not default_url and stream_urls:
-            if format_streams:
-                default_url = format_streams[0].get("url")
-            else:
-                default_url = stream_urls[0].get("url")
+            default_url = stream_urls[0].get("url")
                 
-        video_urls = [default_url] if default_url else ([fmt.get("url") for fmt in adaptive if "video" in fmt.get("type", "")])
+        video_urls = [default_url] if default_url else []
 
         recommended = [{
             "video_id": rec.get("videoId"),
