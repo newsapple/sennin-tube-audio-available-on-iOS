@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Query
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -7,6 +7,8 @@ import asyncio
 import json
 import random
 from datetime import datetime
+import subprocess
+import urllib.parse
 
 app = FastAPI()
 
@@ -19,6 +21,44 @@ INVIDIOUS_INSTANCES = [
 
 limits = httpx.Limits(max_connections=300, max_keepalive_connections=100)
 client_session = httpx.AsyncClient(timeout=10.0, limits=limits, follow_redirects=True)
+
+# ---------------------------------------------------------
+# FFmpeg リアルタイム結合ストリーミング エンドポイント
+# ---------------------------------------------------------
+@app.get("/proxy/mux")
+async def proxy_mux(video_url: str, audio_url: str):
+    # 再エンコードなし(-c copy)でMP4映像とM4A音声を結合し、fMP4として標準出力へ流す
+    command = [
+        "ffmpeg",
+        "-re",
+        "-i", video_url,
+        "-i", audio_url,
+        "-c:v", "copy",
+        "-c:a", "copy",
+        "-f", "mp4",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "pipe:1"
+    ]
+
+    def iterfile():
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=10**8
+        )
+        try:
+            while True:
+                chunk = process.stdout.read(4096)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            process.stdout.close()
+            process.kill()
+
+    return StreamingResponse(iterfile(), media_type="video/mp4")
+# ---------------------------------------------------------
 
 async def fetch_invidious(endpoint: str, params: dict = None, force_instance: str = None):
     if force_instance:
@@ -178,13 +218,54 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
 
         if isinstance(video_data, Exception): raise video_data
         
-        # HLS URLの取得
-        hls_url = video_data.get("hlsUrl")
+        # HLS URLの取得と絶対パス化処理
+        raw_hls = video_data.get("hlsUrl")
+        hls_url = None
+        if raw_hls:
+            if raw_hls.startswith("/"):
+                hls_url = f"{INVIDIOUS_INSTANCES[0].rstrip('/')}{raw_hls}"
+            else:
+                hls_url = raw_hls
+
+        adaptive = video_data.get("adaptiveFormats", [])
         
+        audio_url = None
+        fallback_url = None
+        best_score = -1
+        
+        # 音声トラックの抽出（MP4/M4A優先）
+        for f in adaptive:
+            if "audio" in f.get("type", ""):
+                if fallback_url is None:
+                    fallback_url = f.get("url")
+                
+                audio_track = f.get("audioTrack", {})
+                track_name = audio_track.get("name", "").lower()
+                lang = f.get("language", "").lower()
+                is_default = audio_track.get("audioIsDefault") is True or f.get("isDefaultAudioTrack") is True
+                url_str = f.get("url", "").lower()
+                
+                track_score = 0
+                if not audio_track: track_score = 1
+                if is_default: track_score = 2
+                if "original" in track_name or "オリジナル" in track_name or "acont%3doriginal" in url_str: track_score = 3
+                if (lang.startswith("ja") or lang.startswith("jp") or "japanese" in track_name or "日本語" in track_name or "lang%3dja" in url_str or "lang%3djp" in url_str or "lang=ja" in url_str or "lang=jp" in url_str):
+                    track_score = 100
+                
+                if "mp4" in f.get("type", "") or "m4a" in f.get("container", ""):
+                    track_score += 1000
+                
+                if track_score > best_score:
+                    best_score = track_score
+                    audio_url = f.get("url")
+
+        if audio_url is None:
+            audio_url = fallback_url
+
         format_streams = video_data.get("formatStreams", [])
         stream_urls = []
         
-        # ダウンロード用・フォールバック用のMP4ストリーム一覧
+        # 結合済みMP4
         for fmt in format_streams:
             stream_urls.append({
                 "url": fmt.get("url"),
@@ -192,10 +273,35 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
                 "format": "mp4/mixed",
                 "rawVideoUrl": fmt.get("url")
             })
+        
+        # 分離されたMP4映像トラックと音声をサーバー内で結合するURLを構築
+        for fmt in adaptive:
+            if "video" in fmt.get("type", "") and "mp4" in fmt.get("container", "mp4"):
+                v_url = fmt.get("url")
+                if audio_url:
+                    mux_url = f"/proxy/mux?video_url={urllib.parse.quote(v_url, safe='')}&audio_url={urllib.parse.quote(audio_url, safe='')}"
+                else:
+                    mux_url = v_url
+                
+                stream_urls.append({
+                    "url": mux_url,
+                    "resolution": fmt.get("qualityLabel"),
+                    "format": "mp4/fMP4-Stream",
+                    "rawVideoUrl": v_url # DL保存用
+                })
 
-        # デフォルトURLには HLS (m3u8) を最優先で割り当てる
-        default_url = hls_url if hls_url else (stream_urls[0]["url"] if stream_urls else None)
-        video_urls = [default_url] if default_url else []
+        # バックエンド結合のデフォルト画質を720pに設定
+        default_mp4_url = None
+        for stream in stream_urls:
+            if "720p" in str(stream.get("resolution", "")):
+                default_mp4_url = stream.get("url")
+                break
+        
+        if not default_mp4_url and stream_urls:
+            default_mp4_url = stream_urls[0].get("url")
+                
+        # HLSが失敗した時のために、フロントエンドの videourls[0] にはバックエンド結合のURLを渡す
+        video_urls = [default_mp4_url] if default_mp4_url else []
 
         recommended = [{
             "video_id": rec.get("videoId"),
