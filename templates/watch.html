@@ -105,6 +105,16 @@
             width: 100%; aspect-ratio: 16/9; background: #000;
             border-radius: 20px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.15);
         }
+		#play-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center;
+            z-index: 10; cursor: pointer;
+        }
+        #play-overlay i {
+            font-size: 5rem; color: rgba(255,255,255,0.9);
+            transition: transform 0.2s;
+        }
+        #play-overlay:hover i { transform: scale(1.1); color: #fff; }
         video { width: 100%; height: 100%; outline: none; }
         iframe { width: 100%; height: 100%; border: none; }
         .loader-overlay {
@@ -321,7 +331,12 @@
         <div class="video-section">
             <div id="player-wrapper">
                 <div id="loader" class="loader-overlay"><div class="custom-loader"></div></div>
-                <video id="video-player" controls autoplay poster="/thumbnail?v={{ videoid }}" src="{{ videourls[0] }}">
+                <!-- カスタム再生ボタンを追加 -->
+                <div id="play-overlay">
+                    <i class="fas fa-play-circle"></i>
+                </div>
+                <!-- playsinline を追加 -->
+                <video id="video-player" controls autoplay playsinline poster="/thumbnail?v={{ videoid }}" src="{{ videourls[0] }}">
                     ブラウザが動画再生に対応していません。
                 </video>
                 <audio id="audio-sync" style="display:none;"></audio>
@@ -633,31 +648,36 @@
             }
         });
 
-        // --- iPadOS/iOS用 Audioアンロックハック ---
-        let isAudioUnlocked = false;
+        // --- カスタム再生オーバーレイによる同期アンロック ---
+        const playOverlay = document.getElementById('play-overlay');
 
-        function unlockAudioOnTouch() {
-            if (!isAudioUnlocked && audio.src) {
-                // 無音状態で再生を試みることで、OSに「ユーザー操作による再生」と認識させる
-                const playPromise = audio.play();
-                if (playPromise !== undefined) {
-                    playPromise.then(() => {
-                        if (video.paused) {
-                            audio.pause();
-                        } else {
-                            // 動画がすでに再生中なら時刻を同期させる
-                            audio.currentTime = video.currentTime;
-                        }
-                        isAudioUnlocked = true;
-                        // 成功したらイベントリスナーを解除
-                        document.removeEventListener('touchstart', unlockAudioOnTouch);
-                        document.removeEventListener('click', unlockAudioOnTouch);
-                    }).catch(error => {
-                        console.warn("Audio unlock failed:", error);
-                    });
+        // 自動再生が成功しているか（PC環境など）を判定し、成功していればボタンを消す
+        setTimeout(() => {
+            if (!video.paused) {
+                playOverlay.style.display = 'none';
+            }
+        }, 300);
+
+        playOverlay.addEventListener('click', () => {
+            // ユーザーのタップ操作と同じタイミングで両方を強制再生
+            const vPromise = video.play();
+            if (audio.src) {
+                const aPromise = audio.play();
+                if (aPromise !== undefined) {
+                    aPromise.catch(e => console.warn("Audio play failed:", e));
                 }
             }
-        }
+            if (vPromise !== undefined) {
+                vPromise.catch(e => console.warn("Video play failed:", e));
+            }
+            playOverlay.style.display = 'none';
+        });
+
+        // 映像が再生中になったら確実にオーバーレイを非表示にする
+        video.addEventListener('playing', () => {
+            playOverlay.style.display = 'none';
+        });
+        // ---------------------------------------------------
 
         // 画面のどこかをタッチした最初のタイミングで発火させる
         document.addEventListener('touchstart', unlockAudioOnTouch, { passive: true });
