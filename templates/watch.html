@@ -274,7 +274,7 @@
             <h2 style="margin-top:0;"><i class="fas fa-download" style="margin-right:10px; color:var(--primary-color);"></i>ダウンロード</h2>
             <div id="dl-list">
                 {% for stream in streamUrls %}
-                    {% if stream.format == 'mp4/mixed' %}
+                    {% if stream.format == 'MP4(低画質)' %}
                     <div class="dl-list-item">
                         <div>
                             <strong>{{ stream.resolution }}</strong> 
@@ -318,7 +318,7 @@
             <div id="player-wrapper">
                 <div id="loader" class="loader-overlay">
                     <div class="custom-loader"></div>
-                    <span style="font-size: 1rem; font-weight: bold;">HLSストリームを準備中...</span>
+                    <span id="loader-text" style="font-size: 1rem; font-weight: bold;">HLSストリームを準備中... (最大30秒)</span>
                 </div>
                 
                 <video id="video-player" controls playsinline poster="/thumbnail?v={{ videoid }}"></video>
@@ -337,13 +337,14 @@
                     <span style="font-size: 0.8rem; color: #888;">画質を選択:</span>
                     <div class="custom-select-wrapper" id="qualitySelect">
                         <div class="custom-select-trigger">
-                            <span>自動 (デフォルト/HLS)</span>
+                            <span>自動 (デフォルト/720p HLS)</span>
                             <i class="fas fa-chevron-down"></i>
                         </div>
                         <div class="custom-options">
-                            <div class="custom-option selected" data-value="{{ videourls[0] | safe }}">自動 (デフォルト/HLS)</div>
+                            <!-- サーバーから渡された一番上のストリーム(HLS)をデフォルトにする -->
+                            <div class="custom-option selected" data-value="{{ videourls[0] | safe }}" data-format="HLS">自動 (デフォルト/720p HLS)</div>
                             {% for stream in streamUrls %}
-                            <div class="custom-option" data-value="{{ stream.url | safe }}">
+                            <div class="custom-option" data-value="{{ stream.url | safe }}" data-format="{{ stream.format }}">
                                 {{ stream.resolution }} ({{ stream.format }})
                             </div>
                             {% endfor %}
@@ -408,17 +409,20 @@
     <script>
         const video = document.getElementById('video-player');
         const loader = document.getElementById('loader');
+        const loaderText = document.getElementById('loader-text');
         const selectWrapper = document.getElementById('qualitySelect');
         const selectTrigger = selectWrapper.querySelector('.custom-select-trigger');
         const options = selectWrapper.querySelectorAll('.custom-option');
         const iframeContainer = document.getElementById('iframe-container');
 
         let hls = null;
+        let isHlsFailed = false;
 
         // --- 初期ロード ---
         document.addEventListener('DOMContentLoaded', () => {
             const initialUrl = "{{ videourls[0] | safe }}";
             if(initialUrl) {
+                // 初期ロード時はHLSとして処理する
                 playHLS(initialUrl);
             }
         });
@@ -426,6 +430,7 @@
         // --- 共通のHLS再生ロジック ---
         function playHLS(url) {
             loader.style.display = 'flex';
+            loaderText.innerText = "HLSストリームを準備中... (最大30秒)";
             
             if (hls) {
                 hls.destroy();
@@ -434,10 +439,8 @@
             video.removeAttribute('src');
             
             if (Hls.isSupported()) {
-                // PC向け
-                hls = new Hls({
-                    maxMaxBufferLength: 30,
-                });
+                // PC / Android向け (hls.js)
+                hls = new Hls({ maxMaxBufferLength: 30 });
                 hls.loadSource(url);
                 hls.attachMedia(video);
                 hls.on(Hls.Events.MANIFEST_PARSED, function() {
@@ -445,42 +448,108 @@
                     video.play().catch(()=>{});
                 });
                 hls.on(Hls.Events.ERROR, function(e, data) {
-                    if(data.fatal) showNotify("再生エラーが発生しました", true);
+                    if(data.fatal) {
+                        loader.style.display = 'none';
+                        hls.destroy();
+                        fallbackToMp4();
+                    }
                 });
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                // iPad向け (Safariネイティブ)
+                // iPad / iOS向け (SafariネイティブHLS再生)
                 video.src = url;
-                video.addEventListener('loadedmetadata', function() {
+                video.addEventListener('loadedmetadata', function onLoaded() {
+                    video.removeEventListener('loadedmetadata', onLoaded);
                     loader.style.display = 'none';
                     video.play().catch(()=>{});
                 });
+                
+                video.addEventListener('error', function onError() {
+                    if (!isHlsFailed && video.src.includes('.m3u8')) {
+                        video.removeEventListener('error', onError);
+                        fallbackToMp4();
+                    }
+                }, {once: true});
             } else {
-                loader.style.display = 'none';
-                showNotify("このブラウザは再生に対応していません", true);
+                fallbackToMp4();
             }
         }
 
+        // --- エラー時のフォールバック処理 (待機なしのMP4低画質) ---
+        function fallbackToMp4() {
+            if (isHlsFailed) return;
+            isHlsFailed = true;
+
+            const fallbackOpt = document.querySelector('.custom-option[data-format="MP4(低画質)"]');
+            if (!fallbackOpt) return;
+            
+            const fallbackUrl = fallbackOpt.getAttribute('data-value');
+            if (!fallbackUrl) return;
+
+            showNotify("HLSの取得に失敗しました。低画質再生に切り替えます。", true);
+            
+            // 画質メニューの見た目更新
+            options.forEach(opt => opt.classList.remove('selected'));
+            fallbackOpt.classList.add('selected');
+            selectTrigger.querySelector('span').innerText = fallbackOpt.innerText;
+
+            changeQualityLogic(fallbackUrl, "MP4");
+        }
+
         // --- 画質変更ロジック ---
+        function changeQualityLogic(url, format) {
+            const currentTime = video.currentTime;
+            const isPaused = video.paused;
+            loader.style.display = 'flex';
+            loaderText.innerText = "画質を切り替えています...";
+            
+            if (hls) { hls.destroy(); hls = null; }
+
+            video.src = url;
+            video.load();
+
+            const onVideoReady = () => {
+                video.removeEventListener('loadedmetadata', onVideoReady);
+                video.currentTime = currentTime;
+                if (!isPaused) {
+                    video.play().catch(() => {});
+                }
+                loader.style.display = 'none';
+            };
+            video.addEventListener('loadedmetadata', onVideoReady);
+        }
+
         options.forEach(option => {
             option.addEventListener('click', function() {
                 const url = this.getAttribute('data-value');
+                const format = this.getAttribute('data-format');
 
                 options.forEach(opt => opt.classList.remove('selected'));
                 this.classList.add('selected');
                 selectTrigger.querySelector('span').innerText = this.innerText;
                 selectWrapper.classList.remove('open');
 
-                playHLS(url);
-                showNotify("画質を切り替えました");
+                if (format && format.includes("HLS")) {
+                    isHlsFailed = false; // フラグリセット
+                    playHLS(url);
+                    showNotify("高画質HLSに切り替えました");
+                } else {
+                    changeQualityLogic(url, format);
+                    showNotify("低画質MP4に切り替えました");
+                }
             });
         });
 
         // --- 再生状態のUI同期 ---
-        video.addEventListener('waiting', () => { loader.style.display = 'flex'; });
+        video.addEventListener('waiting', () => { 
+            loader.style.display = 'flex'; 
+            loaderText.innerText = "データを読み込んでいます...";
+        });
         video.addEventListener('playing', () => { loader.style.display = 'none'; });
         video.addEventListener('error', () => {
+            // ネイティブHLSのエラーはフォールバック関数で拾うので無視
+            if (!isHlsFailed && video.src && video.src.includes('.m3u8')) return;
             loader.style.display = 'none';
-            showNotify("ストリームが切断されました。リロードしてください。", true);
+            showNotify("読み込みエラーが発生しました。リロードしてください。", true);
         });
 
         // --- UIコントロール ---
