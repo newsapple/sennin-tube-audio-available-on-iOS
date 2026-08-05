@@ -336,7 +336,7 @@
                             <i class="fas fa-chevron-down"></i>
                         </div>
                         <div class="custom-options">
-                            <div class="custom-option selected" data-type="m3u8" data-value="{{ hls_url }}">自動 (デフォルト/HLS)</div>
+                            <div class="custom-option selected" data-type="m3u8" data-value="{{ hls_url | safe }}">自動 (デフォルト/HLS)</div>
                             {% for stream in streamUrls %}
                             <div class="custom-option" data-type="mp4" data-value="{{ stream.url }}">
                                 {{ stream.resolution }} ({{ stream.format }})
@@ -409,8 +409,8 @@
         const iframeContainer = document.getElementById('iframe-container');
         
         let hls = null;
-        let isHlsFailed = false; // HLSフォールバック管理フラグ
-        const hlsUrl = "{{ hls_url }}";
+        let isHlsFailed = false; 
+        const hlsUrl = "{{ hls_url | safe }}";
 
         // 初期化時にHLSを優先再生
         document.addEventListener('DOMContentLoaded', () => {
@@ -451,7 +451,7 @@
                 });
                 // ネイティブ再生失敗時のフォールバック処理
                 video.addEventListener('error', function hlsErrorFallback() {
-                    if (!isHlsFailed && video.src.includes('.m3u8')) {
+                    if (!isHlsFailed) {
                         video.removeEventListener('error', hlsErrorFallback);
                         fallbackToMp4();
                     }
@@ -465,7 +465,11 @@
             if (isHlsFailed) return;
             isHlsFailed = true; // 重複実行を防止
             
-            const fallbackUrl = "{{ videourls[0] }}";
+            // HTML属性(DOM)からURLを取得し、&amp; エスケープのバグを完全に回避する
+            const fallbackOpt = document.querySelector('.custom-option[data-type="mp4"]');
+            if (!fallbackOpt) return;
+            
+            const fallbackUrl = fallbackOpt.getAttribute('data-value');
             if (!fallbackUrl) return;
 
             showNotify("HLS通信に失敗しました。バックエンド結合に切り替えます。", true);
@@ -473,11 +477,8 @@
 
             // 画質メニューの見た目を選択状態に更新
             document.querySelectorAll('.custom-option').forEach(opt => opt.classList.remove('selected'));
-            const fallbackOpt = document.querySelector(`.custom-option[data-value="${fallbackUrl}"]`);
-            if (fallbackOpt) {
-                fallbackOpt.classList.add('selected');
-                selectTrigger.querySelector('span').innerText = fallbackOpt.innerText;
-            }
+            fallbackOpt.classList.add('selected');
+            selectTrigger.querySelector('span').innerText = fallbackOpt.innerText;
         }
 
         function toggleControlMenu() {
@@ -594,8 +595,8 @@
         });
 
         video.addEventListener('error', () => {
-            // HLSネイティブエラーの場合はフォールバック側で処理されるため除外
-            if (!isHlsFailed && video.src && video.src.includes('.m3u8')) return;
+            // HLSネイティブエラーの場合はフォールバック側で処理されるため、ここでの通知を除外
+            if (!isHlsFailed && video.src && (video.src.includes('hls') || video.src.includes('manifest'))) return;
             
             if (currentSourceType !== 'stream') return;
             loader.style.display = 'none';
