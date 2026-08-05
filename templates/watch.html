@@ -8,7 +8,6 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
     <script src="https://code.jquery.com/ui/1.12.1/jquery-ui.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
         :root {
             --primary-color: #007bff;
@@ -88,13 +87,8 @@
             z-index: 2000; display: none;
             animation: slideIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
         }
-        #custom-alert.error {
-            border-left-color: var(--error-color);
-        }
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateX(100px); }
-            to { opacity: 1; transform: translateX(0); }
-        }
+        #custom-alert.error { border-left-color: var(--error-color); }
+        @keyframes slideIn { from { opacity: 0; transform: translateX(100px); } to { opacity: 1; transform: translateX(0); } }
         .watch-container {
             display: grid; grid-template-columns: 2.3fr 1fr; gap: 30px;
             max-width: 1700px; margin: 20px auto; padding: 0 30px;
@@ -105,16 +99,6 @@
             width: 100%; aspect-ratio: 16/9; background: #000;
             border-radius: 20px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.15);
         }
-        #audio-unlock-overlay {
-            display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.8); color: #fff; z-index: 20;
-            flex-direction: column; align-items: center; justify-content: center; cursor: pointer;
-        }
-        #audio-unlock-overlay i {
-            font-size: 4rem; margin-bottom: 15px; color: var(--primary-color);
-            animation: pulse 1.5s infinite;
-        }
-        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }
         video { width: 100%; height: 100%; outline: none; }
         iframe { width: 100%; height: 100%; border: none; }
         .loader-overlay {
@@ -294,7 +278,7 @@
                         <strong>{{ stream.resolution }}</strong> 
                         <span style="color:#888; font-size:0.8rem; margin-left:5px;">({{ stream.format }})</span>
                     </div>
-                    <a href="{{ stream.url }}" download class="quality-btn" style="text-decoration:none;">保存</a>
+                    <a href="{{ stream.rawVideoUrl or stream.url }}" download class="quality-btn" style="text-decoration:none;">保存</a>
                 </div>
                 {% endfor %}
             </div>
@@ -330,14 +314,10 @@
         <div class="video-section">
             <div id="player-wrapper">
                 <div id="loader" class="loader-overlay"><div class="custom-loader"></div></div>
-                <div id="audio-unlock-overlay">
-                    <i class="fas fa-volume-up"></i>
-                    <span style="font-size:1.2rem; font-weight:bold;">タップして音声を再生</span>
-                </div>
-                <video id="video-player" controls autoplay playsinline poster="/thumbnail?v={{ videoid }}" src="{{ videourls[0] }}">
+                <!-- 完全にネイティブな単一のVideoタグ -->
+                <video id="video-player" controls playsinline preload="auto" poster="/thumbnail?v={{ videoid }}" src="{{ videourls[0] }}">
                     ブラウザが動画再生に対応していません。
                 </video>
-                <audio id="audio-sync" style="display:none;" preload="auto" playsinline></audio>
                 <div id="iframe-container" style="display:none; width:100%; height:100%;"></div>
             </div>
 
@@ -356,15 +336,12 @@
                             <i class="fas fa-chevron-down"></i>
                         </div>
                         <div class="custom-options">
-                            <div class="custom-option selected" data-value="{{ videourls[0] }}" data-audio="">自動 (デフォルト)</div>
+                            <div class="custom-option selected" data-value="{{ videourls[0] }}">自動 (デフォルト)</div>
                             {% for stream in streamUrls %}
-                            <div class="custom-option" 
-                                 data-value="{{ stream.url }}"
-                                 data-audio="{{ stream.audioUrl or '' }}">
+                            <div class="custom-option" data-value="{{ stream.url }}">
                                 {{ stream.resolution }} ({{ stream.format }})
                             </div>
                             {% endfor %}
-                            <div class="custom-option" data-type="m3u8" data-value="{{ youtube_url }}">HLS (m3u8)</div>
                         </div>
                     </div>
                 </div>
@@ -425,14 +402,11 @@
 
     <script>
         const video = document.getElementById('video-player');
-        const audio = document.getElementById('audio-sync');
         const loader = document.getElementById('loader');
         const selectWrapper = document.getElementById('qualitySelect');
         const selectTrigger = selectWrapper.querySelector('.custom-select-trigger');
         const options = selectWrapper.querySelectorAll('.custom-option');
         const iframeContainer = document.getElementById('iframe-container');
-        const audioUnlockOverlay = document.getElementById('audio-unlock-overlay');
-        let hls = null;
 
         function toggleControlMenu() {
             const menu = document.getElementById('ctrlMenu');
@@ -447,7 +421,6 @@
 
         function toggleMute(el) {
             video.muted = !video.muted;
-            audio.muted = video.muted;
             el.classList.toggle('active');
             showNotify(video.muted ? "音声をミュートしました" : "ミュートを解除しました");
         }
@@ -495,17 +468,7 @@
 
         options.forEach(option => {
             option.addEventListener('click', function() {
-                const type = this.getAttribute('data-type');
                 const url = this.getAttribute('data-value');
-                const audioUrl = this.getAttribute('data-audio');
-
-                if (type === 'm3u8') {
-                    if (confirm("取得に時間がかかりますがよろしいですか？")) {
-                        selectWrapper.classList.remove('open');
-                        fetchM3U8(url);
-                    }
-                    return;
-                }
 
                 if (video.src === url) {
                     selectWrapper.classList.remove('open');
@@ -516,54 +479,9 @@
                 selectTrigger.querySelector('span').innerText = this.innerText;
                 selectWrapper.classList.remove('open');
                 
-                changeQualityLogic(url, audioUrl);
+                changeQualityLogic(url);
             });
         });
-
-        async function fetchM3U8(ytUrl) {
-            loader.style.display = 'flex';
-            showNotify("M3U8を取得中... (最大30秒)");
-            
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000);
-
-            try {
-                const apiUrl = `https://siasama-m3u8.onrender.com/extract?url=${encodeURIComponent(ytUrl)}`;
-                const resp = await fetch(apiUrl, { signal: controller.signal });
-                const data = await resp.json();
-                clearTimeout(timeoutId);
-
-                if (data && data.url) {
-                    playM3U8(data.url);
-                    showNotify("HLS再生を開始します");
-                } else {
-                    throw new Error("Invalid URL");
-                }
-            } catch (err) {
-                loader.style.display = 'none';
-                showNotify("取得に失敗しました。タイムアウトかサーバーエラーです。", true);
-            }
-        }
-
-        function playM3U8(m3u8Url) {
-            if (hls) {
-                hls.destroy();
-            }
-            audio.src = "";
-            if (Hls.isSupported()) {
-                hls = new Hls();
-                hls.loadSource(m3u8Url);
-                hls.attachMedia(video);
-                hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                    video.play();
-                });
-            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = m3u8Url;
-                video.addEventListener('loadedmetadata', function() {
-                    video.play();
-                });
-            }
-        }
 
         window.addEventListener('click', (e) => {
             if (!selectWrapper.contains(e.target) && !document.getElementById('floating-control').contains(e.target)) {
@@ -573,18 +491,11 @@
             }
         });
 
-        function changeQualityLogic(url, audioUrl) {
-            if (hls) { hls.destroy(); hls = null; }
+        function changeQualityLogic(url) {
             const currentTime = video.currentTime;
             const isPaused = video.paused;
             loader.style.display = 'flex';
             video.src = url;
-            if(audioUrl) {
-                audio.src = audioUrl;
-                audio.load();
-            } else {
-                audio.src = "";
-            }
             video.onloadedmetadata = () => {
                 video.currentTime = currentTime;
                 if (!isPaused) video.play().catch(() => {});
@@ -593,153 +504,18 @@
             showNotify("画質を切り替えました");
         }
 
-        function reloadVideoSource() {
-            if (currentSourceType !== 'stream') return;
-            const currentTime = video.currentTime;
-            const wasPlaying = !video.paused;
-            video.load();
-            if (audio.src) audio.load();
-            video.onloadedmetadata = () => {
-                video.currentTime = currentTime;
-                if (audio.src) audio.currentTime = currentTime;
-                if (wasPlaying) {
-                    video.play().catch(() => {});
-                    if (audio.src) audio.play().catch(() => {});
-                }
-                video.onloadedmetadata = null;
-            };
-            showNotify("動画ソースを再接続しました");
-        }
-
-        // --- 同期およびエラーハンドリングロジック ---
-
-        function syncAudio() {
-            if (audio.src && audio.readyState >= 3) {
-                if (Math.abs(video.currentTime - audio.currentTime) > 0.5) {
-                    audio.currentTime = video.currentTime;
-                }
-            }
-        }
-
-        function handleAudioUnlock(e) {
-            if (e) e.preventDefault();
-            audioUnlockOverlay.style.display = 'none';
-            loader.style.display = 'flex';
-
-            const playPromise = audio.play();
-            if (playPromise !== undefined) {
-                playPromise.then(() => {
-                    loader.style.display = 'none';
-                    syncAudio();
-                    if (video.paused) video.play();
-                }).catch(err => {
-                    console.warn("Unlock failed:", err);
-                    loader.style.display = 'none';
-                    audioUnlockOverlay.style.display = 'flex';
-                });
-            }
-        }
-
-        audioUnlockOverlay.addEventListener('click', handleAudioUnlock);
-        audioUnlockOverlay.addEventListener('touchend', handleAudioUnlock);
-
-        video.addEventListener('play', () => {
-            if (audio.src) {
-                audio.play().catch(err => {
-                    console.log("Audio play blocked. Waiting for user interaction.");
-                    audioUnlockOverlay.style.display = 'flex';
-                });
-                syncAudio();
-            }
-        });
-
-        video.addEventListener('pause', () => {
-            if (audio.src) audio.pause();
-        });
-
-        video.addEventListener('seeked', () => {
-            syncAudio();
-        });
-
         video.addEventListener('waiting', () => {
             loader.style.display = 'flex';
-            if (audio.src) audio.pause();
         });
 
         video.addEventListener('playing', () => {
             loader.style.display = 'none';
-            if (audio.src && !video.paused) {
-                audio.play().catch(e => {
-                    audioUnlockOverlay.style.display = 'flex';
-                });
-                syncAudio();
-            }
         });
 
-        video.addEventListener('ratechange', () => {
-            if (audio.src) audio.playbackRate = video.playbackRate;
-        });
-
-        video.addEventListener('volumechange', () => {
-            if (audio.src) {
-                audio.volume = video.volume;
-                audio.muted = video.muted;
-            }
-        });
-
-        let lastSyncCheck = 0;
-        video.addEventListener('timeupdate', () => {
-            const now = Date.now();
-            if (now - lastSyncCheck > 2000) {
-                lastSyncCheck = now;
-                if (audio.src && !video.paused) {
-                    syncAudio();
-                }
-            }
-        });
-
-        let errorHistory = [];
         video.addEventListener('error', () => {
             if (currentSourceType !== 'stream') return;
             loader.style.display = 'none';
-            
-            const now = Date.now();
-            errorHistory.push(now);
-            errorHistory = errorHistory.filter(time => now - time <= 10000);
-
-            if (errorHistory.length >= 3) {
-                showNotify("頻繁なエラーのため、自動リロードを停止しました", true);
-            } else {
-                showNotify("読み込みエラー。再試行中...", true);
-                setTimeout(reloadVideoSource, 1000);
-            }
-        });
-
-        document.addEventListener('DOMContentLoaded', () => {
-            const defaultUrl = video.getAttribute('src');
-            let initialAudioUrl = "";
-            
-            options.forEach(opt => {
-                if (opt.getAttribute('data-value') === defaultUrl && opt.getAttribute('data-audio')) {
-                    initialAudioUrl = opt.getAttribute('data-audio');
-                }
-            });
-
-            if (initialAudioUrl) {
-                audio.src = initialAudioUrl;
-                
-                const defaultOpt = document.querySelector('.custom-option.selected');
-                if (defaultOpt) {
-                    defaultOpt.setAttribute('data-audio', initialAudioUrl);
-                }
-            }
-            
-            // もし自動再生が成功していればオーバーレイを消す
-            setTimeout(() => {
-                if (!video.paused) {
-                    audioUnlockOverlay.style.display = 'none';
-                }
-            }, 500);
+            showNotify("読み込みエラーが発生しました。", true);
         });
 
         function showNotify(msg, isError = false) {
