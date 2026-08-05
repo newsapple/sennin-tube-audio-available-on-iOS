@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
     <script src="https://code.jquery.com/ui/1.12.1/jquery-ui.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
         :root {
             --primary-color: #007bff;
@@ -99,19 +100,6 @@
             width: 100%; aspect-ratio: 16/9; background: #000;
             border-radius: 20px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.15);
         }
-        
-        /* 再生用オーバーレイ */
-        #play-overlay {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.6); display: flex; flex-direction: column; align-items: center; justify-content: center;
-            z-index: 10; cursor: pointer; color: #fff;
-        }
-        #play-overlay i {
-            font-size: 5rem; margin-bottom: 15px; color: var(--primary-color);
-            transition: transform 0.2s;
-        }
-        #play-overlay:hover i { transform: scale(1.1); color: #fff; }
-        
         video { width: 100%; height: 100%; outline: none; }
         iframe { width: 100%; height: 100%; border: none; }
         .loader-overlay {
@@ -125,7 +113,6 @@
             animation: spin 1s linear infinite; margin-bottom: 15px;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
-        
         .video-details, .description-card, .comment-section {
             background: var(--card-bg); border-radius: 20px; padding: 25px; margin-top: 20px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.05);
@@ -287,7 +274,6 @@
             <h2 style="margin-top:0;"><i class="fas fa-download" style="margin-right:10px; color:var(--primary-color);"></i>ダウンロード</h2>
             <div id="dl-list">
                 {% for stream in streamUrls %}
-                    <!-- ダウンロード用は結合済みの安全なMP4のみ出力 -->
                     {% if stream.format == 'mp4/mixed' %}
                     <div class="dl-list-item">
                         <div>
@@ -332,17 +318,10 @@
             <div id="player-wrapper">
                 <div id="loader" class="loader-overlay">
                     <div class="custom-loader"></div>
-                    <span style="font-size: 1rem; font-weight: bold;">データを読み込んでいます...</span>
+                    <span style="font-size: 1rem; font-weight: bold;">HLSストリームを準備中...</span>
                 </div>
                 
-                <div id="play-overlay">
-                    <i class="fas fa-play-circle"></i>
-                    <span style="font-size:1.2rem; font-weight:bold;">タップして再生</span>
-                </div>
-                
-                <!-- 初期状態ではURLをセットせず、通信の競合を防ぐ -->
-                <video id="video-player" playsinline poster="/thumbnail?v={{ videoid }}"></video>
-                <audio id="audio-sync" playsinline></audio>
+                <video id="video-player" controls playsinline poster="/thumbnail?v={{ videoid }}"></video>
                 
                 <div id="iframe-container" style="display:none; width:100%; height:100%;"></div>
             </div>
@@ -358,14 +337,13 @@
                     <span style="font-size: 0.8rem; color: #888;">画質を選択:</span>
                     <div class="custom-select-wrapper" id="qualitySelect">
                         <div class="custom-select-trigger">
-                            <span>自動 (720p 推奨)</span>
+                            <span>自動 (デフォルト/HLS)</span>
                             <i class="fas fa-chevron-down"></i>
                         </div>
                         <div class="custom-options">
-                            <!-- サーバーから渡された一番上のストリームをデフォルトにする -->
-                            <div class="custom-option selected" data-value="{{ videourls[0] }}" data-audio="">自動 (720p 推奨)</div>
+                            <div class="custom-option selected" data-value="{{ videourls[0] | safe }}">自動 (デフォルト/HLS)</div>
                             {% for stream in streamUrls %}
-                            <div class="custom-option" data-value="{{ stream.url | safe }}" data-audio="{{ stream.audioUrl | safe }}">
+                            <div class="custom-option" data-value="{{ stream.url | safe }}">
                                 {{ stream.resolution }} ({{ stream.format }})
                             </div>
                             {% endfor %}
@@ -429,197 +407,83 @@
 
     <script>
         const video = document.getElementById('video-player');
-        const audio = document.getElementById('audio-sync');
-        const playOverlay = document.getElementById('play-overlay');
         const loader = document.getElementById('loader');
         const selectWrapper = document.getElementById('qualitySelect');
         const selectTrigger = selectWrapper.querySelector('.custom-select-trigger');
         const options = selectWrapper.querySelectorAll('.custom-option');
         const iframeContainer = document.getElementById('iframe-container');
 
-        let currentVideoUrl = "";
-        let currentAudioUrl = "";
+        let hls = null;
 
-        // --- 初期URLの取得 ---
+        // --- 初期ロード ---
         document.addEventListener('DOMContentLoaded', () => {
-            currentVideoUrl = "{{ videourls[0] | safe }}";
-            options.forEach(opt => {
-                if (opt.getAttribute('data-value') === currentVideoUrl && opt.getAttribute('data-audio')) {
-                    currentAudioUrl = opt.getAttribute('data-audio');
-                }
-            });
-            const defaultOpt = document.querySelector('.custom-option.selected');
-            if (defaultOpt && currentAudioUrl) {
-                defaultOpt.setAttribute('data-audio', currentAudioUrl);
+            const initialUrl = "{{ videourls[0] | safe }}";
+            if(initialUrl) {
+                playHLS(initialUrl);
             }
         });
 
-        // --- 究極のフロントエンド同期 (直列ロード) ---
-        // ユーザーが再生ボタンを押した時に初めて通信を開始し、iPadのデッドロックを完全に防ぐ
-        playOverlay.addEventListener('click', () => {
-            playOverlay.style.display = 'none';
+        // --- 共通のHLS再生ロジック ---
+        function playHLS(url) {
             loader.style.display = 'flex';
             
-            executeSequentialLoad(currentVideoUrl, currentAudioUrl);
-        });
-
-        function executeSequentialLoad(vUrl, aUrl) {
-            video.removeAttribute('controls'); // ロード中は操作不可にする
-            video.src = vUrl;
-            video.load();
-
-            // 1. 映像のバッファリングが開始できる状態になったら
-            const onVideoReady = () => {
-                video.removeEventListener('loadedmetadata', onVideoReady);
-                video.removeEventListener('canplay', onVideoReady);
-                
-                // 2. 続いて音声のロードを開始する（通信をずらす）
-                if (aUrl && aUrl !== "None" && aUrl !== "") {
-                    audio.src = aUrl;
-                    audio.load();
-                    
-                    let isAudioReady = false;
-                    const onAudioReady = () => {
-                        if (isAudioReady) return;
-                        isAudioReady = true;
-                        audio.removeEventListener('loadedmetadata', onAudioReady);
-                        startSynchronizedPlayback();
-                    };
-                    
-                    audio.addEventListener('loadedmetadata', onAudioReady);
-                    
-                    // iPad特有のフェイルセーフ: 音声ロードが3秒以上スタックしたら強制的に再生を試みる
-                    setTimeout(() => {
-                        if (!isAudioReady) {
-                            isAudioReady = true;
-                            audio.removeEventListener('loadedmetadata', onAudioReady);
-                            console.log("Audio load timeout. Forcing playback.");
-                            startSynchronizedPlayback();
-                        }
-                    }, 3000);
-                    
-                } else {
-                    audio.src = "";
-                    startSynchronizedPlayback();
-                }
-            };
-
-            video.addEventListener('loadedmetadata', onVideoReady);
-            video.addEventListener('canplay', onVideoReady);
-        }
-
-        function startSynchronizedPlayback() {
-            loader.style.display = 'none';
-            video.setAttribute('controls', 'controls');
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+            video.removeAttribute('src');
             
-            const vPromise = video.play();
-            if(vPromise !== undefined) vPromise.catch(e => console.warn(e));
-            
-            if (audio.src) {
-                audio.currentTime = video.currentTime;
-                const aPromise = audio.play();
-                if(aPromise !== undefined) aPromise.catch(e => console.warn(e));
+            if (Hls.isSupported()) {
+                // PC向け
+                hls = new Hls({
+                    maxMaxBufferLength: 30,
+                });
+                hls.loadSource(url);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    loader.style.display = 'none';
+                    video.play().catch(()=>{});
+                });
+                hls.on(Hls.Events.ERROR, function(e, data) {
+                    if(data.fatal) showNotify("再生エラーが発生しました", true);
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                // iPad向け (Safariネイティブ)
+                video.src = url;
+                video.addEventListener('loadedmetadata', function() {
+                    loader.style.display = 'none';
+                    video.play().catch(()=>{});
+                });
+            } else {
+                loader.style.display = 'none';
+                showNotify("このブラウザは再生に対応していません", true);
             }
         }
 
-        // --- 画質変更ロジック (同じく直列ロードを行う) ---
-        function changeQualityLogic(url, audioUrl) {
-            const isPaused = video.paused;
-            const currentTime = video.currentTime;
-            
-            loader.style.display = 'flex';
-            video.removeAttribute('controls');
-            
-            video.src = url;
-            video.load();
-
-            const onVideoReady = () => {
-                video.removeEventListener('loadedmetadata', onVideoReady);
-                video.currentTime = currentTime;
-                
-                if(audioUrl && audioUrl !== "None" && audioUrl !== "") {
-                    audio.src = audioUrl;
-                    audio.load();
-                    
-                    let isAudioReady = false;
-                    const onAudioReady = () => {
-                        if(isAudioReady) return;
-                        isAudioReady = true;
-                        audio.removeEventListener('loadedmetadata', onAudioReady);
-                        finalizeQualityChange(isPaused);
-                    };
-                    
-                    audio.addEventListener('loadedmetadata', onAudioReady);
-                    
-                    setTimeout(() => {
-                        if(!isAudioReady){
-                            isAudioReady = true;
-                            audio.removeEventListener('loadedmetadata', onAudioReady);
-                            finalizeQualityChange(isPaused);
-                        }
-                    }, 3000);
-                } else {
-                    audio.src = "";
-                    finalizeQualityChange(isPaused);
-                }
-            };
-            video.addEventListener('loadedmetadata', onVideoReady);
-        }
-
-        function finalizeQualityChange(wasPaused) {
-            loader.style.display = 'none';
-            video.setAttribute('controls', 'controls');
-            if (audio.src) audio.currentTime = video.currentTime;
-            
-            if (!wasPaused) {
-                video.play().catch(()=>{});
-                if(audio.src) audio.play().catch(()=>{});
-            }
-            showNotify("画質を切り替えました");
-        }
-
+        // --- 画質変更ロジック ---
         options.forEach(option => {
             option.addEventListener('click', function() {
                 const url = this.getAttribute('data-value');
-                const audioUrl = this.getAttribute('data-audio');
 
                 options.forEach(opt => opt.classList.remove('selected'));
                 this.classList.add('selected');
                 selectTrigger.querySelector('span').innerText = this.innerText;
                 selectWrapper.classList.remove('open');
 
-                changeQualityLogic(url, audioUrl);
+                playHLS(url);
+                showNotify("画質を切り替えました");
             });
         });
 
-        // --- 再生中の完全な同期とエラーハンドリング ---
-        video.addEventListener('play', () => {
-            if (audio.src && video.currentTime > 0) {
-                audio.play().catch(e => console.warn(e));
-            }
-        });
-        video.addEventListener('pause', () => { if (audio.src) audio.pause(); });
-        video.addEventListener('seeking', () => { if (audio.src) audio.pause(); });
-        video.addEventListener('seeked', () => {
-            if (audio.src) {
-                audio.currentTime = video.currentTime;
-                if (!video.paused) audio.play().catch(()=>{});
-            }
-        });
-        video.addEventListener('ratechange', () => { if (audio.src) audio.playbackRate = video.playbackRate; });
-        video.addEventListener('volumechange', () => {
-            if (audio.src) { audio.volume = video.volume; audio.muted = video.muted; }
-        });
+        // --- 再生状態のUI同期 ---
         video.addEventListener('waiting', () => { loader.style.display = 'flex'; });
         video.addEventListener('playing', () => { loader.style.display = 'none'; });
-
         video.addEventListener('error', () => {
-            if (currentSourceType !== 'stream') return;
             loader.style.display = 'none';
-            showNotify("読み込みエラーが発生しました。", true);
+            showNotify("ストリームが切断されました。リロードしてください。", true);
         });
 
-        // --- UI・メニューコントロール ---
+        // --- UIコントロール ---
         function toggleControlMenu() {
             const menu = document.getElementById('ctrlMenu');
             menu.style.display = (menu.style.display === 'flex') ? 'none' : 'flex';
@@ -631,7 +495,6 @@
         }
         function toggleMute(el) {
             video.muted = !video.muted;
-            if(audio.src) audio.muted = video.muted;
             el.classList.toggle('active');
             showNotify(video.muted ? "音声をミュートしました" : "ミュートを解除しました");
         }
@@ -640,10 +503,9 @@
             selectWrapper.scrollIntoView({ behavior: 'smooth', block: 'center' });
             setTimeout(() => selectWrapper.classList.add('open'), 500);
         }
-        function toggleSourceOptions() {
-            document.getElementById('srcOpts').classList.toggle('show');
-        }
+        function toggleSourceOptions() { document.getElementById('srcOpts').classList.toggle('show'); }
 
+        let currentSourceType = 'stream';
         function setExternalSource(type) {
             if (currentSourceType === type) return;
             document.querySelectorAll('.sub-item').forEach(i => i.classList.remove('selected'));
@@ -657,11 +519,11 @@
                 video.style.display = 'block';
                 showNotify("Streamソースに戻しました");
             } else {
-                let domain = type === 'nocookie' ? 'www.youtube-nocookie.com' : 'www.youtube-education.com';
-                const ytUrl = `https://${domain}/embed/{{ videoid }}?autoplay=1`;
+                if(hls) { hls.destroy(); hls = null; }
                 video.pause();
                 video.style.display = 'none';
-                iframeContainer.innerHTML = `<iframe src="${ytUrl}" allow="autoplay; encrypted-media" allowfullscreen></iframe>`;
+                let domain = type === 'nocookie' ? 'www.youtube-nocookie.com' : 'www.youtube-education.com';
+                iframeContainer.innerHTML = `<iframe src="https://${domain}/embed/{{ videoid }}?autoplay=1" allow="autoplay; encrypted-media" allowfullscreen></iframe>`;
                 iframeContainer.style.display = 'block';
                 showNotify(`${type === 'nocookie' ? 'NoCookie' : 'Education'}に切り替えました`);
             }
@@ -695,9 +557,7 @@
         $('#searchbox').autocomplete({
             source: function (request, response) {
                 $.getJSON("/suggest?keyword=" + encodeURIComponent(request.term), function(data) { response(data); });
-            },
-            delay: 300,
-            open: function() { $('.ui-autocomplete').hide().fadeIn(200); }
+            }, delay: 300, open: function() { $('.ui-autocomplete').hide().fadeIn(200); }
         });
         function openModal() { document.getElementById('dl-modal').style.display = 'flex'; }
         function closeModal() { document.getElementById('dl-modal').style.display = 'none'; }
