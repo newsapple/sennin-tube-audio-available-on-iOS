@@ -633,6 +633,37 @@
             }
         });
 
+        // --- iPadOS/iOS用 Audioアンロックハック ---
+        let isAudioUnlocked = false;
+
+        function unlockAudioOnTouch() {
+            if (!isAudioUnlocked && audio.src) {
+                // 無音状態で再生を試みることで、OSに「ユーザー操作による再生」と認識させる
+                const playPromise = audio.play();
+                if (playPromise !== undefined) {
+                    playPromise.then(() => {
+                        if (video.paused) {
+                            audio.pause();
+                        } else {
+                            // 動画がすでに再生中なら時刻を同期させる
+                            audio.currentTime = video.currentTime;
+                        }
+                        isAudioUnlocked = true;
+                        // 成功したらイベントリスナーを解除
+                        document.removeEventListener('touchstart', unlockAudioOnTouch);
+                        document.removeEventListener('click', unlockAudioOnTouch);
+                    }).catch(error => {
+                        console.warn("Audio unlock failed:", error);
+                    });
+                }
+            }
+        }
+
+        // 画面のどこかをタッチした最初のタイミングで発火させる
+        document.addEventListener('touchstart', unlockAudioOnTouch, { passive: true });
+        document.addEventListener('click', unlockAudioOnTouch, { passive: true });
+        // ------------------------------------------
+
         let isSyncing = false;
         video.addEventListener('timeupdate', () => {
             if (audio.src && !video.paused && !isSyncing) {
@@ -644,7 +675,13 @@
                 }
             }
         });
-        video.addEventListener('play', () => { if (audio.src) audio.play().catch(() => {}); });
+        video.addEventListener('play', () => { 
+            if (audio.src) {
+                audio.play().catch((err) => {
+                    console.log("Audio AutoPlay Blocked. Waiting for user interaction.", err);
+                }); 
+            }
+        });
         video.addEventListener('pause', () => { if (audio.src) audio.pause(); });
         video.addEventListener('seeking', () => { if (audio.src) audio.currentTime = video.currentTime; });
         video.addEventListener('ratechange', () => { if (audio.src) audio.playbackRate = video.playbackRate; });
