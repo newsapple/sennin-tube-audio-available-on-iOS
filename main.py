@@ -7,7 +7,6 @@ import asyncio
 import json
 import random
 from datetime import datetime
-import subprocess
 import urllib.parse
 
 app = FastAPI()
@@ -23,41 +22,24 @@ limits = httpx.Limits(max_connections=300, max_keepalive_connections=100)
 client_session = httpx.AsyncClient(timeout=10.0, limits=limits, follow_redirects=True)
 
 # ---------------------------------------------------------
-# FFmpeg リアルタイム結合ストリーミング エンドポイント
+# HLS マニフェスト プロキシ (CORS・404回避用)
 # ---------------------------------------------------------
-@app.get("/proxy/mux")
-async def proxy_mux(video_url: str, audio_url: str):
-    # 再エンコードなし(-c copy)でMP4映像とM4A音声を結合し、fMP4として標準出力へ流す
-    command = [
-        "ffmpeg",
-        "-re",
-        "-i", video_url,
-        "-i", audio_url,
-        "-c:v", "copy",
-        "-c:a", "copy",
-        "-f", "mp4",
-        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-        "pipe:1"
-    ]
-
-    def iterfile():
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=10**8
-        )
+@app.get("/proxy/hls")
+async def proxy_hls(url: str):
+    async with httpx.AsyncClient() as client:
         try:
-            while True:
-                chunk = process.stdout.read(4096)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            process.stdout.close()
-            process.kill()
-
-    return StreamingResponse(iterfile(), media_type="video/mp4")
+            res = await client.get(url, follow_redirects=True, timeout=8.0)
+            res.raise_for_status()
+            content = res.text
+            
+            # 相対パスが含まれている場合は絶対パスに補正して返す
+            base_domain = INVIDIOUS_INSTANCES[0]
+            if "videoplayback?" not in content and "/videoplayback?" in content:
+                 content = content.replace("/videoplayback?", f"{base_domain}/videoplayback?")
+                 
+            return Response(content=content, media_type="application/vnd.apple.mpegurl")
+        except Exception:
+            return Response(status_code=404)
 # ---------------------------------------------------------
 
 async def fetch_invidious(endpoint: str, params: dict = None, force_instance: str = None):
@@ -218,14 +200,15 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
 
         if isinstance(video_data, Exception): raise video_data
         
-        # HLS URLの取得と絶対パス化処理
+        # HLS URLの取得とプロキシURLへの変換処理
         raw_hls = video_data.get("hlsUrl")
-        hls_url = None
+        proxied_hls_url = None
         if raw_hls:
             if raw_hls.startswith("/"):
-                hls_url = f"{INVIDIOUS_INSTANCES[0].rstrip('/')}{raw_hls}"
+                absolute_hls = f"{INVIDIOUS_INSTANCES[0].rstrip('/')}{raw_hls}"
             else:
-                hls_url = raw_hls
+                absolute_hls = raw_hls
+            proxied_hls_url = f"/proxy/hls?url={urllib.parse.quote(absolute_hls, safe='')}"
 
         adaptive = video_data.get("adaptiveFormats", [])
         
@@ -233,7 +216,6 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
         fallback_url = None
         best_score = -1
         
-        # 音声トラックの抽出（MP4/M4A優先）
         for f in adaptive:
             if "audio" in f.get("type", ""):
                 if fallback_url is None:
@@ -265,43 +247,37 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
         format_streams = video_data.get("formatStreams", [])
         stream_urls = []
         
-        # 結合済みMP4
+        # ダウンロード用・フォールバック用のMP4ストリーム一覧
         for fmt in format_streams:
             stream_urls.append({
                 "url": fmt.get("url"),
                 "resolution": fmt.get("qualityLabel"),
                 "format": "mp4/mixed",
+                "audioUrl": "",
                 "rawVideoUrl": fmt.get("url")
             })
         
-        # 分離されたMP4映像トラックと音声をサーバー内で結合するURLを構築
+        # 万が一HLSが失敗した時のための、フロントエンド同期用のMP4分離ストリーム
         for fmt in adaptive:
             if "video" in fmt.get("type", "") and "mp4" in fmt.get("container", "mp4"):
-                v_url = fmt.get("url")
-                if audio_url:
-                    mux_url = f"/proxy/mux?video_url={urllib.parse.quote(v_url, safe='')}&audio_url={urllib.parse.quote(audio_url, safe='')}"
-                else:
-                    mux_url = v_url
-                
                 stream_urls.append({
-                    "url": mux_url,
+                    "url": fmt.get("url"),
                     "resolution": fmt.get("qualityLabel"),
-                    "format": "mp4/fMP4-Stream",
-                    "rawVideoUrl": v_url # DL保存用
+                    "format": "mp4/videoOnly",
+                    "audioUrl": audio_url,
+                    "rawVideoUrl": fmt.get("url") # DL保存用
                 })
 
-        # バックエンド結合のデフォルト画質を720pに設定
-        default_mp4_url = None
+        # デフォルトURL設定
+        default_url = None
         for stream in stream_urls:
             if "720p" in str(stream.get("resolution", "")):
-                default_mp4_url = stream.get("url")
+                default_url = stream.get("url")
                 break
-        
-        if not default_mp4_url and stream_urls:
-            default_mp4_url = stream_urls[0].get("url")
+        if not default_url and stream_urls:
+            default_url = stream_urls[0].get("url")
                 
-        # HLSが失敗した時のために、フロントエンドの videourls[0] にはバックエンド結合のURLを渡す
-        video_urls = [default_mp4_url] if default_mp4_url else []
+        video_urls = [default_url] if default_url else []
 
         recommended = [{
             "video_id": rec.get("videoId"),
@@ -320,7 +296,7 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
             "videoid": v,
             "video_title": video_data.get("title"),
             "videourls": video_urls,
-            "hls_url": hls_url,
+            "hls_url": proxied_hls_url, # プロキシ済みのHLS URLを渡す
             "streamUrls": stream_urls,
             "author": video_data.get("author"),
             "author_id": video_data.get("authorId"),
