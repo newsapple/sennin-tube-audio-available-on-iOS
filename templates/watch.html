@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
     <script src="https://code.jquery.com/ui/1.12.1/jquery-ui.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
         :root {
             --primary-color: #007bff;
@@ -314,8 +315,7 @@
         <div class="video-section">
             <div id="player-wrapper">
                 <div id="loader" class="loader-overlay"><div class="custom-loader"></div></div>
-                <!-- 完全にネイティブな単一のVideoタグ -->
-                <video id="video-player" controls playsinline preload="auto" poster="/thumbnail?v={{ videoid }}" src="{{ videourls[0] }}">
+                <video id="video-player" controls autoplay playsinline poster="/thumbnail?v={{ videoid }}">
                     ブラウザが動画再生に対応していません。
                 </video>
                 <div id="iframe-container" style="display:none; width:100%; height:100%;"></div>
@@ -332,13 +332,13 @@
                     <span style="font-size: 0.8rem; color: #888;">画質を選択:</span>
                     <div class="custom-select-wrapper" id="qualitySelect">
                         <div class="custom-select-trigger">
-                            <span>自動 (デフォルト)</span>
+                            <span>自動 (デフォルト/HLS)</span>
                             <i class="fas fa-chevron-down"></i>
                         </div>
                         <div class="custom-options">
-                            <div class="custom-option selected" data-value="{{ videourls[0] }}">自動 (デフォルト)</div>
+                            <div class="custom-option selected" data-type="m3u8" data-value="{{ hls_url }}">自動 (デフォルト/HLS)</div>
                             {% for stream in streamUrls %}
-                            <div class="custom-option" data-value="{{ stream.url }}">
+                            <div class="custom-option" data-type="mp4" data-value="{{ stream.url }}">
                                 {{ stream.resolution }} ({{ stream.format }})
                             </div>
                             {% endfor %}
@@ -407,6 +407,43 @@
         const selectTrigger = selectWrapper.querySelector('.custom-select-trigger');
         const options = selectWrapper.querySelectorAll('.custom-option');
         const iframeContainer = document.getElementById('iframe-container');
+        let hls = null;
+
+        const hlsUrl = "{{ hls_url }}";
+
+        // 初期化時にHLSを優先再生
+        document.addEventListener('DOMContentLoaded', () => {
+            if (hlsUrl && hlsUrl !== "None") {
+                playM3U8(hlsUrl);
+            } else {
+                video.src = "{{ videourls[0] }}";
+                video.play().catch(() => {});
+            }
+        });
+
+        function playM3U8(m3u8Url) {
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+            video.removeAttribute('src');
+
+            if (Hls.isSupported()) {
+                // PC / Android向け (hls.js)
+                hls = new Hls();
+                hls.loadSource(m3u8Url);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    video.play().catch(() => {});
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                // iPad / iOS向け (SafariネイティブHLS再生)
+                video.src = m3u8Url;
+                video.addEventListener('loadedmetadata', function() {
+                    video.play().catch(() => {});
+                });
+            }
+        }
 
         function toggleControlMenu() {
             const menu = document.getElementById('ctrlMenu');
@@ -468,30 +505,30 @@
 
         options.forEach(option => {
             option.addEventListener('click', function() {
+                const type = this.getAttribute('data-type');
                 const url = this.getAttribute('data-value');
 
-                if (video.src === url) {
-                    selectWrapper.classList.remove('open');
-                    return;
-                }
                 options.forEach(opt => opt.classList.remove('selected'));
                 this.classList.add('selected');
                 selectTrigger.querySelector('span').innerText = this.innerText;
                 selectWrapper.classList.remove('open');
-                
+
+                if (type === 'm3u8') {
+                    if (hlsUrl && hlsUrl !== "None") {
+                        playM3U8(hlsUrl);
+                        showNotify("HLS再生に切り替えました");
+                    } else {
+                        showNotify("この動画はHLSに対応していません", true);
+                    }
+                    return;
+                }
+
                 changeQualityLogic(url);
             });
         });
 
-        window.addEventListener('click', (e) => {
-            if (!selectWrapper.contains(e.target) && !document.getElementById('floating-control').contains(e.target)) {
-                selectWrapper.classList.remove('open');
-                document.getElementById('ctrlMenu').style.display = 'none';
-                document.getElementById('srcOpts').classList.remove('show');
-            }
-        });
-
         function changeQualityLogic(url) {
+            if (hls) { hls.destroy(); hls = null; }
             const currentTime = video.currentTime;
             const isPaused = video.paused;
             loader.style.display = 'flex';
@@ -503,6 +540,14 @@
             };
             showNotify("画質を切り替えました");
         }
+
+        window.addEventListener('click', (e) => {
+            if (!selectWrapper.contains(e.target) && !document.getElementById('floating-control').contains(e.target)) {
+                selectWrapper.classList.remove('open');
+                document.getElementById('ctrlMenu').style.display = 'none';
+                document.getElementById('srcOpts').classList.remove('show');
+            }
+        });
 
         video.addEventListener('waiting', () => {
             loader.style.display = 'flex';
