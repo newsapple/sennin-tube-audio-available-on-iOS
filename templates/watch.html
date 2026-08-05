@@ -407,8 +407,9 @@
         const selectTrigger = selectWrapper.querySelector('.custom-select-trigger');
         const options = selectWrapper.querySelectorAll('.custom-option');
         const iframeContainer = document.getElementById('iframe-container');
+        
         let hls = null;
-
+        let isHlsFailed = false; // HLSフォールバック管理フラグ
         const hlsUrl = "{{ hls_url }}";
 
         // 初期化時にHLSを優先再生
@@ -416,8 +417,7 @@
             if (hlsUrl && hlsUrl !== "None") {
                 playM3U8(hlsUrl);
             } else {
-                video.src = "{{ videourls[0] }}";
-                video.play().catch(() => {});
+                fallbackToMp4();
             }
         });
 
@@ -436,12 +436,47 @@
                 hls.on(Hls.Events.MANIFEST_PARSED, function() {
                     video.play().catch(() => {});
                 });
+                hls.on(Hls.Events.ERROR, function(event, data) {
+                    if (data.fatal) {
+                        console.warn("HLS Error:", data);
+                        hls.destroy();
+                        fallbackToMp4();
+                    }
+                });
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 // iPad / iOS向け (SafariネイティブHLS再生)
                 video.src = m3u8Url;
                 video.addEventListener('loadedmetadata', function() {
                     video.play().catch(() => {});
                 });
+                // ネイティブ再生失敗時のフォールバック処理
+                video.addEventListener('error', function hlsErrorFallback() {
+                    if (!isHlsFailed && video.src.includes('.m3u8')) {
+                        video.removeEventListener('error', hlsErrorFallback);
+                        fallbackToMp4();
+                    }
+                }, { once: true });
+            } else {
+                fallbackToMp4();
+            }
+        }
+
+        function fallbackToMp4() {
+            if (isHlsFailed) return;
+            isHlsFailed = true; // 重複実行を防止
+            
+            const fallbackUrl = "{{ videourls[0] }}";
+            if (!fallbackUrl) return;
+
+            showNotify("HLS通信に失敗しました。バックエンド結合に切り替えます。", true);
+            changeQualityLogic(fallbackUrl);
+
+            // 画質メニューの見た目を選択状態に更新
+            document.querySelectorAll('.custom-option').forEach(opt => opt.classList.remove('selected'));
+            const fallbackOpt = document.querySelector(`.custom-option[data-value="${fallbackUrl}"]`);
+            if (fallbackOpt) {
+                fallbackOpt.classList.add('selected');
+                selectTrigger.querySelector('span').innerText = fallbackOpt.innerText;
             }
         }
 
@@ -515,6 +550,7 @@
 
                 if (type === 'm3u8') {
                     if (hlsUrl && hlsUrl !== "None") {
+                        isHlsFailed = false; // フラグリセット
                         playM3U8(hlsUrl);
                         showNotify("HLS再生に切り替えました");
                     } else {
@@ -558,6 +594,9 @@
         });
 
         video.addEventListener('error', () => {
+            // HLSネイティブエラーの場合はフォールバック側で処理されるため除外
+            if (!isHlsFailed && video.src && video.src.includes('.m3u8')) return;
+            
             if (currentSourceType !== 'stream') return;
             loader.style.display = 'none';
             showNotify("読み込みエラーが発生しました。", true);
