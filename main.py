@@ -195,33 +195,25 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
                 track_name = audio_track.get("name", "").lower()
                 lang = f.get("language", "").lower()
                 is_default = audio_track.get("audioIsDefault") is True or f.get("isDefaultAudioTrack") is True
-                
-                # 追加: URL内のクエリパラメータからも情報を取得できるようにする
                 url_str = f.get("url", "").lower()
                 
                 track_score = 0
                 
-                # 優先度1: 指定なしの普通の動画
                 if not audio_track:
                     track_score = 1
                 
-                # 優先度2: APIがデフォルトと言い張るもの
                 if is_default:
                     track_score = 2
                     
-                # 優先度3: オリジナルの可能性 (URL内に acont=original が含まれるかどうかも判定)
                 if "original" in track_name or "オリジナル" in track_name or "acont%3doriginal" in url_str:
                     track_score = 3
                 
-                # 優先度100(最強): 日本語のトラックを絶対に見つけて選ぶ
-                # (URL内に lang=ja や lang=jp が含まれるかどうかも判定に追加)
                 if (lang.startswith("ja") or lang.startswith("jp") or 
                     "japanese" in track_name or "日本語" in track_name or 
                     "lang%3dja" in url_str or "lang%3djp" in url_str or 
                     "lang=ja" in url_str or "lang=jp" in url_str):
                     track_score = 100
                 
-                # スコアが一番高いURLに書き換える
                 if track_score > best_score:
                     best_score = track_score
                     audio_url = f.get("url")
@@ -247,7 +239,7 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
 
         default_url = None
         for stream in stream_urls:
-            if "480p" in str(stream.get("resolution", "")):
+            if "720p" in str(stream.get("resolution", "")):
                 default_url = stream.get("url")
                 break
         
@@ -275,6 +267,7 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
             "request": request,
             "videoid": v,
             "video_title": video_data.get("title"),
+            "dash_url": video_data.get("dashUrl"),
             "videourls": video_urls,
             "streamUrls": stream_urls,
             "author": video_data.get("author"),
@@ -363,7 +356,6 @@ async def channel(request: Request, ucid: str, sort_by: str = "newest", tab: str
         playlists_data = results[3] if not isinstance(results[3], Exception) else {}
         community_data = results[4] if not isinstance(results[4], Exception) else {}
 
-        # 配列（list型）のレスポンスと辞書（dict型）のレスポンスの双方に対応
         if isinstance(videos_data, list):
             final_videos = videos_data
         elif isinstance(videos_data, dict):
