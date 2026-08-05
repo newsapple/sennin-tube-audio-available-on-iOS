@@ -105,16 +105,16 @@
             width: 100%; aspect-ratio: 16/9; background: #000;
             border-radius: 20px; overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.15);
         }
-        #play-overlay {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center;
-            z-index: 10; cursor: pointer;
+        #audio-unlock-overlay {
+            display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); color: #fff; z-index: 20;
+            flex-direction: column; align-items: center; justify-content: center; cursor: pointer;
         }
-        #play-overlay i {
-            font-size: 5rem; color: rgba(255,255,255,0.9);
-            transition: transform 0.2s;
+        #audio-unlock-overlay i {
+            font-size: 4rem; margin-bottom: 15px; color: var(--primary-color);
+            animation: pulse 1.5s infinite;
         }
-        #play-overlay:hover i { transform: scale(1.1); color: #fff; }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }
         video { width: 100%; height: 100%; outline: none; }
         iframe { width: 100%; height: 100%; border: none; }
         .loader-overlay {
@@ -330,15 +330,13 @@
         <div class="video-section">
             <div id="player-wrapper">
                 <div id="loader" class="loader-overlay"><div class="custom-loader"></div></div>
-                <!-- カスタム再生ボタンを追加 -->
-                <div id="play-overlay">
-                    <i class="fas fa-play-circle"></i>
+                <div id="audio-unlock-overlay">
+                    <i class="fas fa-volume-up"></i>
+                    <span style="font-size:1.2rem; font-weight:bold;">タップして音声を再生</span>
                 </div>
-                <!-- playsinline を追加 -->
                 <video id="video-player" controls autoplay playsinline poster="/thumbnail?v={{ videoid }}" src="{{ videourls[0] }}">
                     ブラウザが動画再生に対応していません。
                 </video>
-                <!-- 音声同期用のタグを復元 -->
                 <audio id="audio-sync" style="display:none;"></audio>
                 <div id="iframe-container" style="display:none; width:100%; height:100%;"></div>
             </div>
@@ -358,7 +356,6 @@
                             <i class="fas fa-chevron-down"></i>
                         </div>
                         <div class="custom-options">
-                            <!-- data-audio 属性を復元 -->
                             <div class="custom-option selected" data-value="{{ videourls[0] }}" data-audio="">自動 (デフォルト)</div>
                             {% for stream in streamUrls %}
                             <div class="custom-option" 
@@ -434,6 +431,7 @@
         const selectTrigger = selectWrapper.querySelector('.custom-select-trigger');
         const options = selectWrapper.querySelectorAll('.custom-option');
         const iframeContainer = document.getElementById('iframe-container');
+        const audioUnlockOverlay = document.getElementById('audio-unlock-overlay');
         let hls = null;
 
         function toggleControlMenu() {
@@ -575,7 +573,6 @@
             }
         });
 
-        // audioUrlを再設定できるように引数を復元
         function changeQualityLogic(url, audioUrl) {
             if (hls) { hls.destroy(); hls = null; }
             const currentTime = video.currentTime;
@@ -614,29 +611,81 @@
             showNotify("動画ソースを再接続しました");
         }
 
-        let loadStuckTimer = null;
-        video.addEventListener('play', () => {
-            loadStuckTimer = setTimeout(() => {
-                if (video.currentTime === 0 && video.readyState < 3) {
-                    reloadVideoSource();
+        // --- 同期およびエラーハンドリングロジック ---
+        function syncAudio() {
+            if (audio.src) {
+                // ズレが0.5秒以上ある時だけ修正し、無駄なシークによる途切れを防ぐ
+                if (Math.abs(video.currentTime - audio.currentTime) > 0.5) {
+                    audio.currentTime = video.currentTime;
                 }
-            }, 5000);
-        });
-        video.addEventListener('waiting', () => { 
-            loader.style.display = 'flex';
-            if (!loadStuckTimer) {
-                loadStuckTimer = setTimeout(() => {
-                    if (video.paused === false) reloadVideoSource();
-                }, 8000);
             }
-        });
-        video.addEventListener('playing', () => { 
-            loader.style.display = 'none'; 
-            clearTimeout(loadStuckTimer);
-            loadStuckTimer = null;
+        }
+
+        audioUnlockOverlay.addEventListener('click', () => {
+            audio.play().then(() => {
+                syncAudio();
+                audioUnlockOverlay.style.display = 'none';
+                if (video.paused) video.play();
+            }).catch(e => console.warn("Unlock failed:", e));
         });
 
-        // 無限ループ防止付きのエラーハンドリング
+        video.addEventListener('play', () => {
+            if (audio.src) {
+                audio.play().catch(err => {
+                    console.log("Audio play blocked. Waiting for user interaction.");
+                    audioUnlockOverlay.style.display = 'flex';
+                });
+                syncAudio();
+            }
+        });
+
+        video.addEventListener('pause', () => {
+            if (audio.src) audio.pause();
+        });
+
+        video.addEventListener('seeked', () => {
+            syncAudio();
+        });
+
+        video.addEventListener('waiting', () => {
+            loader.style.display = 'flex';
+            if (audio.src) audio.pause();
+        });
+
+        video.addEventListener('playing', () => {
+            loader.style.display = 'none';
+            if (audio.src && !video.paused) {
+                audio.play().catch(e => {
+                    audioUnlockOverlay.style.display = 'flex';
+                });
+                syncAudio();
+            }
+        });
+
+        video.addEventListener('ratechange', () => {
+            if (audio.src) audio.playbackRate = video.playbackRate;
+        });
+
+        video.addEventListener('volumechange', () => {
+            if (audio.src) {
+                audio.volume = video.volume;
+                audio.muted = video.muted;
+            }
+        });
+
+        let lastSyncCheck = 0;
+        video.addEventListener('timeupdate', () => {
+            const now = Date.now();
+            if (now - lastSyncCheck > 2000) { // 2秒に1回だけ緩くチェック
+                lastSyncCheck = now;
+                if (audio.src && !video.paused) {
+                    if (Math.abs(video.currentTime - audio.currentTime) > 0.5) {
+                        audio.currentTime = video.currentTime;
+                    }
+                }
+            }
+        });
+
         let errorHistory = [];
         video.addEventListener('error', () => {
             if (currentSourceType !== 'stream') return;
@@ -646,68 +695,12 @@
             errorHistory.push(now);
             errorHistory = errorHistory.filter(time => now - time <= 10000);
 
-            // 10秒以内に3回以上エラーが起きたらリロードを停止
+            // 短期間に3回以上エラーが起きたらリロードを停止して無限ループを防ぐ
             if (errorHistory.length >= 3) {
                 showNotify("頻繁なエラーのため、自動リロードを停止しました", true);
             } else {
                 showNotify("読み込みエラー。再試行中...", true);
                 setTimeout(reloadVideoSource, 1000);
-            }
-        });
-
-        // オーバーレイハック
-        const playOverlay = document.getElementById('play-overlay');
-        setTimeout(() => {
-            if (!video.paused) {
-                playOverlay.style.display = 'none';
-            }
-        }, 500);
-
-        playOverlay.addEventListener('click', () => {
-            const vPromise = video.play();
-            if (audio.src) {
-                const aPromise = audio.play();
-                if (aPromise !== undefined) {
-                    aPromise.catch(e => console.warn("Audio play failed:", e));
-                }
-            }
-            if (vPromise !== undefined) {
-                vPromise.catch(e => console.warn("Video play failed:", e));
-            }
-            playOverlay.style.display = 'none';
-        });
-
-        video.addEventListener('playing', () => {
-            playOverlay.style.display = 'none';
-        });
-
-        // 元の安定していた同期ロジック
-        let isSyncing = false;
-        video.addEventListener('timeupdate', () => {
-            if (audio.src && !video.paused && !isSyncing) {
-                const diff = video.currentTime - audio.currentTime;
-                if (Math.abs(diff) > 0.3) {
-                    isSyncing = true;
-                    audio.currentTime = video.currentTime;
-                    setTimeout(() => { isSyncing = false; }, 50);
-                }
-            }
-        });
-        video.addEventListener('play', () => { 
-            if (audio.src) {
-                audio.play().catch((err) => {
-                    console.log("Audio AutoPlay Blocked.", err);
-                    playOverlay.style.display = 'flex'; // ブロックされたらオーバーレイを表示
-                }); 
-            }
-        });
-        video.addEventListener('pause', () => { if (audio.src) audio.pause(); });
-        video.addEventListener('seeking', () => { if (audio.src) audio.currentTime = video.currentTime; });
-        video.addEventListener('ratechange', () => { if (audio.src) audio.playbackRate = video.playbackRate; });
-        video.addEventListener('volumechange', () => {
-            if (audio.src) {
-                audio.volume = video.volume;
-                audio.muted = video.muted;
             }
         });
 
