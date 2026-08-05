@@ -11,6 +11,7 @@ import shutil
 import time
 import subprocess
 import urllib.parse
+import hashlib
 from datetime import datetime
 
 app = FastAPI()
@@ -31,6 +32,9 @@ client_session = httpx.AsyncClient(timeout=10.0, limits=limits, follow_redirects
 HLS_DIR = "/tmp/hls_cache"
 os.makedirs(HLS_DIR, exist_ok=True)
 
+# 動作中のFFmpegプロセスを追跡し、重複やリソース枯渇を防ぐ
+FFMPEG_PROCESSES = {}
+
 def cleanup_old_hls():
     """1時間経過した古いHLSキャッシュを削除してサーバーの容量を解放する"""
     now = time.time()
@@ -43,46 +47,78 @@ def cleanup_old_hls():
     except:
         pass
 
-@app.get("/proxy/hls/{videoid}/index.m3u8")
-async def generate_and_serve_hls(videoid: str, video_url: str, audio_url: str):
+@app.get("/proxy/hls/{videoid}/{url_hash}/index.m3u8")
+async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, audio_url: str = None):
+    global FFMPEG_PROCESSES
     cleanup_old_hls()
-    video_dir = os.path.join(HLS_DIR, videoid)
+    
+    video_dir = os.path.join(HLS_DIR, videoid, url_hash)
     m3u8_path = os.path.join(video_dir, "index.m3u8")
     
+    # 既存のプロセスがあれば強制終了（リソース解放）
+    if videoid in FFMPEG_PROCESSES:
+        try:
+            FFMPEG_PROCESSES[videoid].kill()
+        except:
+            pass
+
     if not os.path.exists(m3u8_path):
         os.makedirs(video_dir, exist_ok=True)
-        # FFmpegで再エンコードなしでHLSセグメントを高速生成
+        
         command = [
             "ffmpeg",
-            "-i", video_url,
-            "-i", audio_url,
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "-i", video_url
+        ]
+        
+        if audio_url:
+            command.extend([
+                "-i", audio_url,
+                "-map", "0:v",
+                "-map", "1:a",
+                "-c:a", "copy"
+            ])
+        else:
+            command.extend(["-map", "0:v"])
+
+        command.extend([
             "-c:v", "copy",
-            "-c:a", "copy",
             "-f", "hls",
-            "-hls_time", "5",          # 5秒ごとに分割して待機時間を最小化
-            "-hls_list_size", "0",     # 過去のセグメントもすべて保持 (VOD対応)
+            "-hls_time", "5",
+            "-hls_list_size", "0",
             "-hls_segment_type", "mpegts",
+            "-hls_flags", "independent_segments",
             "-hls_segment_filename", os.path.join(video_dir, "%04d.ts"),
             m3u8_path
-        ]
-        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ])
         
-        # 最初のプレイリストとセグメントが生成されるまで待機（最大10秒）
-        for _ in range(20):
+        proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        FFMPEG_PROCESSES[videoid] = proc
+        
+        # 最初のm3u8ファイルが生成されるまで待機（最大30秒）
+        for _ in range(60):
             if os.path.exists(m3u8_path):
-                await asyncio.sleep(1.0) # ファイル生成直後のロック回避
+                await asyncio.sleep(0.5) # ファイルのロック回避
+                return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl")
+            
+            # FFmpegが即座にエラー落ちしたかチェック
+            if proc.poll() is not None:
                 break
+                
             await asyncio.sleep(0.5)
-
-    if os.path.exists(m3u8_path):
+            
+        return Response(status_code=404)
+    else:
         return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl")
-    return Response(status_code=404)
 
-@app.get("/proxy/hls/{videoid}/{segment}")
-async def serve_hls_segment(videoid: str, segment: str):
-    segment_path = os.path.join(HLS_DIR, videoid, segment)
+@app.get("/proxy/hls/{videoid}/{url_hash}/{segment}")
+async def serve_hls_segment(videoid: str, url_hash: str, segment: str):
+    segment_path = os.path.join(HLS_DIR, videoid, url_hash, segment)
     
-    # FFmpegによるセグメント生成が追いついていない場合は少し待つ
+    # セグメントの生成が追いついていない場合は最大10秒待機
     for _ in range(20):
         if os.path.exists(segment_path):
             return FileResponse(segment_path, media_type="video/MP2T")
@@ -287,33 +323,40 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
         format_streams = video_data.get("formatStreams", [])
         stream_urls = []
         
-        # ダウンロード用の結合済み低画質MP4
-        for fmt in format_streams:
-            stream_urls.append({
-                "url": fmt.get("url"),
-                "resolution": fmt.get("qualityLabel"),
-                "format": "mp4/mixed",
-                "rawVideoUrl": fmt.get("url")
-            })
-        
         # 独自バックエンドによる高画質HLSストリームの構築
         for fmt in adaptive:
             if "video" in fmt.get("type", "") and "mp4" in fmt.get("container", "mp4"):
                 v_url = fmt.get("url")
-                # FastAPIで作成したHLS生成エンドポイントへのURLを作成
-                local_hls_url = f"/proxy/hls/{v}/index.m3u8?video_url={urllib.parse.quote(v_url, safe='')}&audio_url={urllib.parse.quote(audio_url, safe='')}"
+                
+                # 安全なハッシュディレクトリの生成
+                hash_base = v_url + (audio_url if audio_url else "")
+                url_hash = hashlib.md5(hash_base.encode()).hexdigest()[:8]
+                
+                if audio_url:
+                    local_hls_url = f"/proxy/hls/{v}/{url_hash}/index.m3u8?video_url={urllib.parse.quote(v_url, safe='')}&audio_url={urllib.parse.quote(audio_url, safe='')}"
+                else:
+                    local_hls_url = f"/proxy/hls/{v}/{url_hash}/index.m3u8?video_url={urllib.parse.quote(v_url, safe='')}"
                 
                 stream_urls.append({
                     "url": local_hls_url,
                     "resolution": fmt.get("qualityLabel"),
                     "format": "HLS(独自)",
-                    "rawVideoUrl": v_url # DL用
+                    "rawVideoUrl": v_url # DL保存用
                 })
 
-        # デフォルト画質を720pに設定
+        # ダウンロード用・フォールバック用のMP4ストリーム
+        for fmt in format_streams:
+            stream_urls.append({
+                "url": fmt.get("url"),
+                "resolution": fmt.get("qualityLabel"),
+                "format": "MP4(低画質)",
+                "rawVideoUrl": fmt.get("url")
+            })
+
+        # デフォルト画質を独自のHLS 720pに設定
         default_url = None
         for stream in stream_urls:
-            if "720p" in str(stream.get("resolution", "")):
+            if "720p" in str(stream.get("resolution", "")) and "HLS" in stream.get("format", ""):
                 default_url = stream.get("url")
                 break
         
