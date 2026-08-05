@@ -14,9 +14,7 @@ templates = Jinja2Templates(directory="templates")
 templates.env.add_extension('jinja2.ext.do')
 
 INVIDIOUS_INSTANCES = [
-  #"https://invidious.ritoge.com",
   "https://yt.omada.cafe"
-  #"https://y.com.sb"
 ]
 
 limits = httpx.Limits(max_connections=300, max_keepalive_connections=100)
@@ -214,6 +212,11 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
                     "lang=ja" in url_str or "lang=jp" in url_str):
                     track_score = 100
                 
+                # iPadの <audio> タグで再生不可能なWebM(Opus)を回避するため、
+                # M4A(AAC) 形式に対してスコアを大幅に加算し、最優先で取得させる
+                if "mp4" in f.get("type", "") or "m4a" in f.get("container", ""):
+                    track_score += 50
+                
                 if track_score > best_score:
                     best_score = track_score
                     audio_url = f.get("url")
@@ -267,7 +270,6 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
             "request": request,
             "videoid": v,
             "video_title": video_data.get("title"),
-            "dash_url": video_data.get("dashUrl"),
             "videourls": video_urls,
             "streamUrls": stream_urls,
             "author": video_data.get("author"),
