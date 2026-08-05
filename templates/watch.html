@@ -614,8 +614,6 @@
         // --- 同期およびエラーハンドリングロジック ---
 
         function syncAudio() {
-            // 音声がロードされており、少なくともHAVE_FUTURE_DATA(3)以上の場合のみシークを許可する
-            // これにより、ロード中の無限シーク（ストール）を防ぐ
             if (audio.src && audio.readyState >= 3) {
                 if (Math.abs(video.currentTime - audio.currentTime) > 0.5) {
                     audio.currentTime = video.currentTime;
@@ -623,7 +621,6 @@
             }
         }
 
-        // タップした瞬間にオーバーレイを消し、代わりにローダーを表示して待たせる
         function handleAudioUnlock(e) {
             if (e) e.preventDefault();
             audioUnlockOverlay.style.display = 'none';
@@ -638,7 +635,7 @@
                 }).catch(err => {
                     console.warn("Unlock failed:", err);
                     loader.style.display = 'none';
-                    audioUnlockOverlay.style.display = 'flex'; // 失敗したら再表示
+                    audioUnlockOverlay.style.display = 'flex';
                 });
             }
         }
@@ -693,10 +690,10 @@
         let lastSyncCheck = 0;
         video.addEventListener('timeupdate', () => {
             const now = Date.now();
-            if (now - lastSyncCheck > 2000) { // 2秒に1回だけ緩くチェック
+            if (now - lastSyncCheck > 2000) {
                 lastSyncCheck = now;
                 if (audio.src && !video.paused) {
-                    syncAudio(); // 内部でreadyStateをチェックしているため安全
+                    syncAudio();
                 }
             }
         });
@@ -710,7 +707,6 @@
             errorHistory.push(now);
             errorHistory = errorHistory.filter(time => now - time <= 10000);
 
-            // 10秒以内に3回以上エラーが起きたらリロードを停止
             if (errorHistory.length >= 3) {
                 showNotify("頻繁なエラーのため、自動リロードを停止しました", true);
             } else {
@@ -731,14 +727,19 @@
 
             if (initialAudioUrl) {
                 audio.src = initialAudioUrl;
-                // iOS環境ではユーザー操作外での load() はブロック・遅延の原因になるため削除
-                // audio.load(); 
                 
                 const defaultOpt = document.querySelector('.custom-option.selected');
                 if (defaultOpt) {
                     defaultOpt.setAttribute('data-audio', initialAudioUrl);
                 }
             }
+            
+            // もし自動再生が成功していればオーバーレイを消す
+            setTimeout(() => {
+                if (!video.paused) {
+                    audioUnlockOverlay.style.display = 'none';
+                }
+            }, 500);
         });
 
         function showNotify(msg, isError = false) {
