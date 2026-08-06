@@ -55,21 +55,17 @@ async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, au
     video_dir = os.path.join(HLS_DIR, videoid, url_hash)
     m3u8_path = os.path.join(video_dir, "index.m3u8")
     
-    # 【追加】iOS Safari用の強烈なキャッシュ無効化ヘッダー
+    # iOS Safari用の強烈なキャッシュ無効化ヘッダー
     no_cache_headers = {
         "Cache-Control": "no-cache, no-store, must-revalidate",
         "Pragma": "no-cache",
         "Expires": "0"
     }
 
-    # 【重要】既に同じ画質(url_hash)のファイルが存在する場合、
-    # プロセスを殺さずにそのまま既存のm3u8を返す（iOSのポーリング対策）
+    # 既存のファイルがあればプロセスを殺さずに返す（iOSのポーリング対策）
     if os.path.exists(m3u8_path):
         return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl", headers=no_cache_headers)
 
-    # --- ここから新規生成（または画質変更時）のロジック ---
-    
-    # 別の画質（違うurl_hash）などで古いプロセスが動いている場合のみ強制終了する
     if videoid in FFMPEG_PROCESSES:
         try:
             FFMPEG_PROCESSES[videoid].kill()
@@ -78,18 +74,32 @@ async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, au
 
     os.makedirs(video_dir, exist_ok=True)
     
+    # 【重要追加】Render.comのIP弾き（403エラー）を回避するため、
+    # FFmpegの通信先を Invidious (yt.omada.cafe) の内蔵プロキシ経由に書き換える
+    def rewrite_to_proxy(url):
+        if not url: return None
+        parsed = urllib.parse.urlparse(url)
+        if "googlevideo.com" in parsed.netloc:
+            # 元のクエリに host=元のドメイン を追加して自身のInvidiousに投げさせる
+            query = parsed.query + f"&host={parsed.netloc}"
+            return f"https://yt.omada.cafe/videoplayback?{query}"
+        return url
+
+    proxied_video_url = rewrite_to_proxy(video_url)
+    proxied_audio_url = rewrite_to_proxy(audio_url)
+
     command = [
         "ffmpeg",
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
         "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "-i", video_url
+        "-i", proxied_video_url # プロキシ化されたURLを使用
     ]
     
-    if audio_url:
+    if proxied_audio_url:
         command.extend([
-            "-i", audio_url,
+            "-i", proxied_audio_url, # プロキシ化されたURLを使用
             "-map", "0:v",
             "-map", "1:a",
             "-c:a", "copy"
@@ -100,9 +110,9 @@ async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, au
     command.extend([
         "-c:v", "copy",
         "-f", "hls",
-        "-hls_time", "2",  # 【変更】5秒から2秒へ短縮。iOSは3セグメント揃うまで再生を開始しないため、2秒x3=6秒分を爆速で生成させて即再生させる
+        "-hls_time", "2", # iOS爆速再生のために2秒に短縮
         "-hls_list_size", "0",
-        "-hls_playlist_type", "event", # 【追加】ファイルが追記型(ライブ生成中)であることをiOSに明示する
+        "-hls_playlist_type", "event", # iOSに追記中であることを明示
         "-hls_segment_type", "mpegts",
         "-hls_flags", "independent_segments",
         "-hls_segment_filename", os.path.join(video_dir, "%04d.ts"),
@@ -120,7 +130,6 @@ async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, au
         
         # FFmpegが即座にエラー落ちしたかチェック
         if proc.poll() is not None:
-            # プロセスがクラッシュした場合、エラー内容を読み取ってログに出力
             error_output = proc.stderr.read().decode(errors='ignore')
             print(f"\n========== FFMPEG ERROR ({videoid}) ==========")
             print(error_output)
