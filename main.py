@@ -26,6 +26,15 @@ INVIDIOUS_INSTANCES = [
 limits = httpx.Limits(max_connections=300, max_keepalive_connections=100)
 client_session = httpx.AsyncClient(timeout=10.0, limits=limits, follow_redirects=True)
 
+def rewrite_to_proxy(url):
+    if not url: return None
+    parsed = urllib.parse.urlparse(url)
+    if "googlevideo.com" in parsed.netloc:
+        query = parsed.query
+        query += f"&host={parsed.netloc}" if query else f"host={parsed.netloc}"
+        return f"https://yt.omada.cafe/videoplayback?{query}"
+    return url
+
 # ---------------------------------------------------------
 # 独自バックエンド HLS(m3u8) リアルタイム変換システム
 # ---------------------------------------------------------
@@ -55,36 +64,41 @@ async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, au
     video_dir = os.path.join(HLS_DIR, videoid, url_hash)
     m3u8_path = os.path.join(video_dir, "index.m3u8")
     
-    # iOS Safari用の強烈なキャッシュ無効化ヘッダー
     no_cache_headers = {
         "Cache-Control": "no-cache, no-store, must-revalidate",
         "Pragma": "no-cache",
         "Expires": "0"
     }
 
-    # 既存のファイルがあればプロセスを殺さずに返す（iOSのポーリング対策）
     if os.path.exists(m3u8_path):
         return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl", headers=no_cache_headers)
 
-    if videoid in FFMPEG_PROCESSES:
-        try:
-            FFMPEG_PROCESSES[videoid].kill()
-        except:
-            pass
+    # 画質ごとのユニークキーを作成
+    process_key = f"{videoid}_{url_hash}"
+
+    # 同じ動画・同じ画質の処理が既に走っている場合は、殺さずに待機（キル・ループ回避）
+    if process_key in FFMPEG_PROCESSES:
+        proc = FFMPEG_PROCESSES[process_key]
+        if proc.poll() is None:
+            for _ in range(60):
+                if os.path.exists(m3u8_path):
+                    await asyncio.sleep(0.5)
+                    return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl", headers=no_cache_headers)
+                await asyncio.sleep(0.5)
+            return Response(status_code=404)
+
+    # 違う画質への変更など、古いプロセスが残っていれば殺す
+    keys_to_delete = []
+    for k, p in FFMPEG_PROCESSES.items():
+        if k.startswith(f"{videoid}_"):
+            try: p.kill()
+            except: pass
+            keys_to_delete.append(k)
+    for k in keys_to_delete:
+        del FFMPEG_PROCESSES[k]
 
     os.makedirs(video_dir, exist_ok=True)
     
-    # 【重要追加】Render.comのIP弾き（403エラー）を回避するため、
-    # FFmpegの通信先を Invidious (yt.omada.cafe) の内蔵プロキシ経由に書き換える
-    def rewrite_to_proxy(url):
-        if not url: return None
-        parsed = urllib.parse.urlparse(url)
-        if "googlevideo.com" in parsed.netloc:
-            # 元のクエリに host=元のドメイン を追加して自身のInvidiousに投げさせる
-            query = parsed.query + f"&host={parsed.netloc}"
-            return f"https://yt.omada.cafe/videoplayback?{query}"
-        return url
-
     proxied_video_url = rewrite_to_proxy(video_url)
     proxied_audio_url = rewrite_to_proxy(audio_url)
 
@@ -94,12 +108,12 @@ async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, au
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "5",
         "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "-i", proxied_video_url # プロキシ化されたURLを使用
+        "-i", proxied_video_url
     ]
     
     if proxied_audio_url:
         command.extend([
-            "-i", proxied_audio_url, # プロキシ化されたURLを使用
+            "-i", proxied_audio_url,
             "-map", "0:v",
             "-map", "1:a",
             "-c:a", "copy"
@@ -110,32 +124,25 @@ async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, au
     command.extend([
         "-c:v", "copy",
         "-f", "hls",
-        "-hls_time", "2", # iOS爆速再生のために2秒に短縮
+        "-hls_time", "2",
         "-hls_list_size", "0",
-        "-hls_playlist_type", "event", # iOSに追記中であることを明示
+        "-hls_playlist_type", "event",
         "-hls_segment_type", "mpegts",
         "-hls_flags", "independent_segments",
         "-hls_segment_filename", os.path.join(video_dir, "%04d.ts"),
         m3u8_path
     ])
     
-    proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    FFMPEG_PROCESSES[videoid] = proc
+    # 【最重要】stderrをDEVNULLに捨ててOSバッファのフリーズ（デッドロック）を完全に防ぐ
+    proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    FFMPEG_PROCESSES[process_key] = proc
     
-    # 最初のm3u8ファイルが生成されるまで待機（最大30秒）
     for _ in range(60):
         if os.path.exists(m3u8_path):
             await asyncio.sleep(0.5)
             return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl", headers=no_cache_headers)
-        
-        # FFmpegが即座にエラー落ちしたかチェック
         if proc.poll() is not None:
-            error_output = proc.stderr.read().decode(errors='ignore')
-            print(f"\n========== FFMPEG ERROR ({videoid}) ==========")
-            print(error_output)
-            print("================================================\n")
             break
-            
         await asyncio.sleep(0.5)
         
     return Response(status_code=404)
@@ -343,18 +350,23 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
                     best_score = track_score
                     audio_url = f.get("url")
 
+        # （前略: 音声の抽出ロジック）
         if audio_url is None:
             audio_url = fallback_url
+            
+        # 【追加】音声URLをプロキシ経由に書き換え
+        audio_url = rewrite_to_proxy(audio_url)
 
         format_streams = video_data.get("formatStreams", [])
         stream_urls = []
         
         # 独自バックエンドによる高画質HLSストリームの構築
         for fmt in adaptive:
+            # コーデックの確実な判定
             if "video" in fmt.get("type", "").lower() and "mp4" in fmt.get("type", "").lower():
-                v_url = fmt.get("url")
+                # 【追加】映像URLをプロキシ経由に書き換え
+                v_url = rewrite_to_proxy(fmt.get("url"))
                 
-                # 安全なハッシュディレクトリの生成
                 hash_base = v_url + (audio_url if audio_url else "")
                 url_hash = hashlib.md5(hash_base.encode()).hexdigest()[:8]
                 
@@ -372,11 +384,13 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
 
         # ダウンロード用・フォールバック用のMP4ストリーム
         for fmt in format_streams:
+            # 【追加】フォールバックMP4もプロキシ経由に書き換え
+            proxied_url = rewrite_to_proxy(fmt.get("url"))
             stream_urls.append({
-                "url": fmt.get("url"),
+                "url": proxied_url,
                 "resolution": fmt.get("qualityLabel"),
                 "format": "MP4(低画質)",
-                "rawVideoUrl": fmt.get("url")
+                "rawVideoUrl": proxied_url
             })
 
         # デフォルト画質を独自のHLS 720pに設定
