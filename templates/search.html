@@ -378,6 +378,13 @@
         $('form').on('submit', function() {
             $('#loading-overlay').css('display', 'flex');
         });
+		
+		$(window).on('pageshow', function(event) {
+            // event.originalEvent.persisted が true の場合、キャッシュから復元されたことを意味します
+            if (event.originalEvent.persisted) {
+                $('#loading-overlay').css('display', 'none');
+            }
+        });
 
         function applyFilter(filterType) {
             document.getElementById('search-type').value = filterType;
