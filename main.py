@@ -291,9 +291,13 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
         # 【追加】Invidious APIに「日本語(ja)」でのレスポンスを強制するパラメータ
         req_params = {"hl": "ja"}
 
+        # --- ここから差し替え ---
         async def fetch_video_speculative(vid):
+            # 【重要】APIに日本語と日本の地域情報を強制するパラメータ
+            req_params = {"hl": "ja", "region": "JP"}
+            
             if force_instance:
-                # 【変更】params=req_params を追加
+                # params=req_params を追加
                 return await fetch_invidious(f"/videos/{vid}", params=req_params, force_instance=force_instance)
             
             instances = list(INVIDIOUS_INSTANCES)
@@ -302,7 +306,7 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
             
             async def task(instance):
                 url = f"{instance.rstrip('/')}/api/v1/videos/{vid}"
-                # 【変更】params=req_params を追加してリクエスト
+                # 【変更】params=req_params を追加してGETリクエスト
                 resp = await client_session.get(url, params=req_params, timeout=4.0)
                 resp.raise_for_status()
                 return resp.json()
@@ -317,13 +321,15 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
             
             for t in pending: t.cancel()
             
-            if res is None: res = await fetch_invidious(f"/videos/{vid}", params=req_params) # 【変更】params追加
+            # 【変更】フォールバック時にも params=req_params を追加
+            if res is None: res = await fetch_invidious(f"/videos/{vid}", params=req_params)
             return res
 
         video_task = fetch_video_speculative(v)
-        # 【変更】コメント取得時にも params={"hl": "ja"} を渡す
+        # 【変更】コメント欄も日本語化するために params={"hl": "ja"} を渡す
         comment_task = fetch_invidious(f"/comments/{v}", params={"hl": "ja"}, force_instance=force_instance)
         video_data, comment_data = await asyncio.gather(video_task, comment_task, return_exceptions=True)
+        # --- ここまで差し替え ---
 
         if isinstance(video_data, Exception): raise video_data
         
