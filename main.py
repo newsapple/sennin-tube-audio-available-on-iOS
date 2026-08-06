@@ -115,11 +115,16 @@ async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, au
     # 最初のm3u8ファイルが生成されるまで待機（最大30秒）
     for _ in range(60):
         if os.path.exists(m3u8_path):
-            await asyncio.sleep(0.5) # ファイルのロック回避
+            await asyncio.sleep(0.5)
             return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl", headers=no_cache_headers)
         
         # FFmpegが即座にエラー落ちしたかチェック
         if proc.poll() is not None:
+            # プロセスがクラッシュした場合、エラー内容を読み取ってログに出力
+            error_output = proc.stderr.read().decode(errors='ignore')
+            print(f"\n========== FFMPEG ERROR ({videoid}) ==========")
+            print(error_output)
+            print("================================================\n")
             break
             
         await asyncio.sleep(0.5)
