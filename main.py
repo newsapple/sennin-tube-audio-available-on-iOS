@@ -607,6 +607,14 @@ async def proxy_thumb(v: str):
 @app.get("/thumbnail")
 async def thumbnail(v: str):
     return await proxy_thumb(v)
+    
+@app.get("/templates/scan_qr.jpg")
+async def serve_qr_guide_image():
+    """QRコード読み込みガイドの画像をフロントエンドに返す"""
+    # ファイルが存在しない場合は404を返す
+    if not os.path.exists("scan_qr.jpg"):
+        return Response(status_code=404)
+    return FileResponse("scan_qr.jpg", media_type="image/jpeg")
 
 @app.get("/subscriptions", response_class=HTMLResponse)
 async def subscriptions_page(request: Request):
