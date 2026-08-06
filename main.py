@@ -20,10 +20,10 @@ templates = Jinja2Templates(directory="templates")
 templates.env.add_extension('jinja2.ext.do')
 
 INVIDIOUS_INSTANCES = [
-  "https://yt.omada.cafe",
-  "https://inv.zoomerville.com",
-  "https://y.com.sb",
-  "https://invidious.ritoge.com"
+  #"https://inv.zoomerville.com",
+  #"https://y.com.sb",
+  #"https://invidious.ritoge.com",
+  "https://yt.omada.cafe"
 ]
 
 limits = httpx.Limits(max_connections=300, max_keepalive_connections=100)
@@ -610,11 +610,11 @@ async def thumbnail(v: str):
     
 @app.get("/templates/scan_qr.jpg")
 async def serve_qr_guide_image():
-    """QRコード読み込みガイドの画像をフロントエンドに返す"""
-    # ファイルが存在しない場合は404を返す
-    if not os.path.exists("scan_qr.jpg"):
+    # 実際のファイルがある場所へのパスを指定
+    file_path = "templates/scan_qr.jpg"
+    if not os.path.exists(file_path):
         return Response(status_code=404)
-    return FileResponse("scan_qr.jpg", media_type="image/jpeg")
+    return FileResponse(file_path, media_type="image/jpeg")
 
 @app.get("/subscriptions", response_class=HTMLResponse)
 async def subscriptions_page(request: Request):
