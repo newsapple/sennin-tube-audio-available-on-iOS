@@ -55,64 +55,76 @@ async def generate_and_serve_hls(videoid: str, url_hash: str, video_url: str, au
     video_dir = os.path.join(HLS_DIR, videoid, url_hash)
     m3u8_path = os.path.join(video_dir, "index.m3u8")
     
-    # 既存のプロセスがあれば強制終了（リソース解放）
+    # 【追加】iOS Safari用の強烈なキャッシュ無効化ヘッダー
+    no_cache_headers = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0"
+    }
+
+    # 【重要】既に同じ画質(url_hash)のファイルが存在する場合、
+    # プロセスを殺さずにそのまま既存のm3u8を返す（iOSのポーリング対策）
+    if os.path.exists(m3u8_path):
+        return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl", headers=no_cache_headers)
+
+    # --- ここから新規生成（または画質変更時）のロジック ---
+    
+    # 別の画質（違うurl_hash）などで古いプロセスが動いている場合のみ強制終了する
     if videoid in FFMPEG_PROCESSES:
         try:
             FFMPEG_PROCESSES[videoid].kill()
         except:
             pass
 
-    if not os.path.exists(m3u8_path):
-        os.makedirs(video_dir, exist_ok=True)
-        
-        command = [
-            "ffmpeg",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
-            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "-i", video_url
-        ]
-        
-        if audio_url:
-            command.extend([
-                "-i", audio_url,
-                "-map", "0:v",
-                "-map", "1:a",
-                "-c:a", "copy"
-            ])
-        else:
-            command.extend(["-map", "0:v"])
-
+    os.makedirs(video_dir, exist_ok=True)
+    
+    command = [
+        "ffmpeg",
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "-i", video_url
+    ]
+    
+    if audio_url:
         command.extend([
-            "-c:v", "copy",
-            "-f", "hls",
-            "-hls_time", "5",
-            "-hls_list_size", "0",
-            "-hls_segment_type", "mpegts",
-            "-hls_flags", "independent_segments",
-            "-hls_segment_filename", os.path.join(video_dir, "%04d.ts"),
-            m3u8_path
+            "-i", audio_url,
+            "-map", "0:v",
+            "-map", "1:a",
+            "-c:a", "copy"
         ])
-        
-        proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        FFMPEG_PROCESSES[videoid] = proc
-        
-        # 最初のm3u8ファイルが生成されるまで待機（最大30秒）
-        for _ in range(60):
-            if os.path.exists(m3u8_path):
-                await asyncio.sleep(0.5) # ファイルのロック回避
-                return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl")
-            
-            # FFmpegが即座にエラー落ちしたかチェック
-            if proc.poll() is not None:
-                break
-                
-            await asyncio.sleep(0.5)
-            
-        return Response(status_code=404)
     else:
-        return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl")
+        command.extend(["-map", "0:v"])
+
+    command.extend([
+        "-c:v", "copy",
+        "-f", "hls",
+        "-hls_time", "2",  # 【変更】5秒から2秒へ短縮。iOSは3セグメント揃うまで再生を開始しないため、2秒x3=6秒分を爆速で生成させて即再生させる
+        "-hls_list_size", "0",
+        "-hls_playlist_type", "event", # 【追加】ファイルが追記型(ライブ生成中)であることをiOSに明示する
+        "-hls_segment_type", "mpegts",
+        "-hls_flags", "independent_segments",
+        "-hls_segment_filename", os.path.join(video_dir, "%04d.ts"),
+        m3u8_path
+    ])
+    
+    proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    FFMPEG_PROCESSES[videoid] = proc
+    
+    # 最初のm3u8ファイルが生成されるまで待機（最大30秒）
+    for _ in range(60):
+        if os.path.exists(m3u8_path):
+            await asyncio.sleep(0.5) # ファイルのロック回避
+            return FileResponse(m3u8_path, media_type="application/vnd.apple.mpegurl", headers=no_cache_headers)
+        
+        # FFmpegが即座にエラー落ちしたかチェック
+        if proc.poll() is not None:
+            break
+            
+        await asyncio.sleep(0.5)
+        
+    return Response(status_code=404)
 
 @app.get("/proxy/hls/{videoid}/{url_hash}/{segment}")
 async def serve_hls_segment(videoid: str, url_hash: str, segment: str):
