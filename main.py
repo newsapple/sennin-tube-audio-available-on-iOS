@@ -337,7 +337,7 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
         
         # 独自バックエンドによる高画質HLSストリームの構築
         for fmt in adaptive:
-            if "video" in fmt.get("type", "") and "mp4" in fmt.get("container", "mp4"):
+            if "video" in fmt.get("type", "").lower() and "mp4" in fmt.get("type", "").lower():
                 v_url = fmt.get("url")
                 
                 # 安全なハッシュディレクトリの生成
