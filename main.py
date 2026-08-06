@@ -20,7 +20,10 @@ templates = Jinja2Templates(directory="templates")
 templates.env.add_extension('jinja2.ext.do')
 
 INVIDIOUS_INSTANCES = [
-  "https://yt.omada.cafe"
+  "https://yt.omada.cafe",
+  "https://inv.zoomerville.com",
+  "https://y.com.sb",
+  "https://invidious.ritoge.com"
 ]
 
 limits = httpx.Limits(max_connections=300, max_keepalive_connections=100)
@@ -285,9 +288,13 @@ async def shorts_player(request: Request, v: str, force_instance: str = Query(No
 @app.get("/watch", response_class=HTMLResponse)
 async def watch(request: Request, v: str = Query(...), force_instance: str = Query(None)):
     try:
+        # 【追加】Invidious APIに「日本語(ja)」でのレスポンスを強制するパラメータ
+        req_params = {"hl": "ja"}
+
         async def fetch_video_speculative(vid):
             if force_instance:
-                return await fetch_invidious(f"/videos/{vid}", force_instance=force_instance)
+                # 【変更】params=req_params を追加
+                return await fetch_invidious(f"/videos/{vid}", params=req_params, force_instance=force_instance)
             
             instances = list(INVIDIOUS_INSTANCES)
             random.shuffle(instances)
@@ -295,7 +302,8 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
             
             async def task(instance):
                 url = f"{instance.rstrip('/')}/api/v1/videos/{vid}"
-                resp = await client_session.get(url, timeout=4.0)
+                # 【変更】params=req_params を追加してリクエスト
+                resp = await client_session.get(url, params=req_params, timeout=4.0)
                 resp.raise_for_status()
                 return resp.json()
 
@@ -309,14 +317,17 @@ async def watch(request: Request, v: str = Query(...), force_instance: str = Que
             
             for t in pending: t.cancel()
             
-            if res is None: res = await fetch_invidious(f"/videos/{vid}")
+            if res is None: res = await fetch_invidious(f"/videos/{vid}", params=req_params) # 【変更】params追加
             return res
 
         video_task = fetch_video_speculative(v)
-        comment_task = fetch_invidious(f"/comments/{v}", force_instance=force_instance)
+        # 【変更】コメント取得時にも params={"hl": "ja"} を渡す
+        comment_task = fetch_invidious(f"/comments/{v}", params={"hl": "ja"}, force_instance=force_instance)
         video_data, comment_data = await asyncio.gather(video_task, comment_task, return_exceptions=True)
 
         if isinstance(video_data, Exception): raise video_data
+        
+        # (これ以降の adaptive = video_data.get("adaptiveFormats", []) などの処理はそのまま)
 
         adaptive = video_data.get("adaptiveFormats", [])
         
