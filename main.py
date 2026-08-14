@@ -20,10 +20,10 @@ templates = Jinja2Templates(directory="templates")
 templates.env.add_extension('jinja2.ext.do')
 
 INVIDIOUS_INSTANCES = [
-  #"https://inv.zoomerville.com",
-  #"https://y.com.sb",
-  #"https://invidious.ritoge.com",
-  "https://yt.omada.cafe"
+  "https://yt.omada.cafe",
+  "https://inv.zoomerville.com",
+  "https://y.com.sb",
+  "https://invidious.ritoge.com"
 ]
 
 limits = httpx.Limits(max_connections=300, max_keepalive_connections=100)
